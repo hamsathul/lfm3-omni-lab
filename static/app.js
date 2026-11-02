@@ -2,7 +2,8 @@
 // in text or speech, calls local and web tools, and has a hands-free live mode.
 // No build step, no dependencies.
 
-import { SpeakingOrb, estimateSeconds } from "./orb.js";
+import { SpeakingOrb, estimateSeconds, pitchOf } from "./orb.js";
+import { wear, ORB_CHOICES, LAB, verbOrb, verbFor } from "./orb-skins.js";
 
 const $ = (sel, root = document) => root.querySelector(sel);
 const $$ = (sel, root = document) => [...root.querySelectorAll(sel)];
@@ -507,7 +508,7 @@ function makeItem(file, voice = false) {
       mediaInfo.set(item.info.id, { ...item.info, url: item.url });
     })
     .catch((err) => { item.error = err.message.startsWith("Failed to fetch") ? "The app server isn't responding." : err.message; })
-    .finally(renderStaged);
+    .finally(() => { renderStaged(); live.renderTray(); });
   return item;
 }
 
@@ -545,27 +546,30 @@ function itemDetail(item) {
   return "Image";
 }
 
+// one attachment waiting to be sent: thumbnail, name, state, and a button that drops it
+function chipFor(item, onRemove, detail = itemDetail(item)) {
+  const chip = el("div", `attachment${item.error ? " failed" : ""}${item.info ? "" : " pending"}`);
+  const t = el("span", "thumb");
+  t.append(thumb(item.kind, item.url));
+  const text = el("span", "attachment-text");
+  text.append(el("span", "attachment-name", item.name), el("span", "attachment-detail", detail));
+  const remove = el("button", "remove", "×");
+  remove.type = "button";
+  remove.title = `Remove ${item.name}`;
+  remove.setAttribute("aria-label", `Remove ${item.name}`);
+  remove.addEventListener("click", onRemove);
+  chip.append(t, text, remove);
+  return chip;
+}
+
 function renderStaged() {
   const box = $("#staged");
   box.hidden = !staged.length;
-  box.replaceChildren(...staged.map((item) => {
-    const chip = el("div", `attachment${item.error ? " failed" : ""}${item.info ? "" : " pending"}`);
-    const t = el("span", "thumb");
-    t.append(thumb(item.kind, item.url));
-    const text = el("span", "attachment-text");
-    text.append(el("span", "attachment-name", item.name), el("span", "attachment-detail", itemDetail(item)));
-    const remove = el("button", "remove", "×");
-    remove.type = "button";
-    remove.title = `Remove ${item.name}`;
-    remove.setAttribute("aria-label", `Remove ${item.name}`);
-    remove.addEventListener("click", () => {
-      staged = staged.filter((s) => s !== item);
-      renderStaged();
-      $("#input").focus();
-    });
-    chip.append(t, text, remove);
-    return chip;
-  }));
+  box.replaceChildren(...staged.map((item) => chipFor(item, () => {
+    staged = staged.filter((s) => s !== item);
+    renderStaged();
+    $("#input").focus();
+  })));
   renderSuggestions();
 }
 
@@ -608,11 +612,17 @@ document.addEventListener("drop", (e) => {
   e.preventDefault();
   dragDepth = 0;
   document.body.classList.remove("dragging");
-  if (e.dataTransfer.files.length) stage([...e.dataTransfer.files]);
+  if (!e.dataTransfer.files.length) return;
+  if (live.open) live.attach([...e.dataTransfer.files]);
+  else stage([...e.dataTransfer.files]);
 });
 $("#input").addEventListener("paste", (e) => {
   const files = [...(e.clipboardData?.files || [])];
   if (files.length) { e.preventDefault(); stage(files); }
+});
+document.addEventListener("paste", (e) => { // in live mode the message box is out of reach
+  const files = [...(e.clipboardData?.files || [])];
+  if (live.open && files.length) { e.preventDefault(); live.attach(files); }
 });
 
 // ---------- the composer ----------
@@ -668,6 +678,16 @@ function refreshControls() {
   for (const b of $$(".speak-btn")) b.disabled = !isReady() || busy || b.dataset.running === "1";
   for (const b of $$(".retry")) b.disabled = !isReady() || busy;
   live.refresh?.();
+}
+
+// A tool at work shows a small Thinking Orb in its icon, in the colour of its kind:
+// blue for the tools on this Mac, amber for the web. Without a tool, the icon goes back
+// to a tick or a cross.
+const INK_RGB = { local: [47, 91, 211], web: [138, 83, 0] };
+function workingOrb(icon, tool, web) {
+  icon.querySelector(".verb-orb")?.remove();
+  icon.classList.toggle("has-orb", !!tool);
+  if (tool) icon.append(verbOrb(verbFor(tool), 22, INK_RGB[web ? "web" : "local"]));
 }
 
 // ---------- the orb in the message bar, and the glow around the bar ----------
@@ -859,7 +879,9 @@ class ReplyView {
     this.card = el("div", `tool pending${WEB_TOOLS.has(name) ? " web" : ""}`);
     const details = el("details");
     const summary = el("summary");
-    summary.append(el("span", "tool-icon"), el("b", null, TOOL_PENDING[name] || name), el("span", "tool-line", toolDetail(name, args, null)));
+    const icon = el("span", "tool-icon");
+    workingOrb(icon, name, WEB_TOOLS.has(name));
+    summary.append(icon, el("b", null, TOOL_PENDING[name] || name), el("span", "tool-line", toolDetail(name, args, null)));
     const raw = el("pre", "tool-raw", `${name}(${JSON.stringify(args)})`);
     details.append(summary, raw);
     this.card.append(details);
@@ -871,6 +893,7 @@ class ReplyView {
   toolResult({ name, result, screenshot }) {
     const card = this.card;
     card.classList.remove("pending");
+    workingOrb($(".tool-icon", card), null);
     if (result?.error) card.classList.add("failed");
     $("summary b", card).textContent = TOOL_LABELS[name] || name;
     $(".tool-line", card).textContent = toolDetail(name, null, result);
@@ -1291,7 +1314,7 @@ const PHASE_TEXT = {
   speaking: "Speaking",
   muted: "Muted. Unmute to talk.",
 };
-const ORB_STATE = { listening: "listening", hearing: "listening", muted: "listening", sending: "thinking", thinking: "thinking", searching: "searching", reading: "searching", speaking: "speaking", done: "done", error: "listening" };
+const ORB_STATE = { listening: "listening", hearing: "hearing", muted: "muted", sending: "gathering", thinking: "thinking", searching: "searching", reading: "reading", speaking: "speaking", done: "done", error: "error" };
 
 // ---------- live mode: how each reply went ----------
 const PERF_TOOLS = {
@@ -1418,11 +1441,22 @@ function showPerf(open) {
   prefs.set("livePerf", open);
 }
 
+// "Voice, " or "Photo and voice, " or "2 photos, video and voice, ": the start of a live "You" entry
+const KIND_WORDS = { image: ["photo", "photos"], video: ["video", "videos"], audio: ["recording", "recordings"] };
+function shownWords(items) {
+  const counts = {};
+  for (const i of items) counts[i.kind] = (counts[i.kind] || 0) + 1;
+  const parts = [...Object.entries(counts).map(([k, n]) => (n === 1 ? KIND_WORDS[k][0] : `${n} ${KIND_WORDS[k][1]}`)), "voice"];
+  const text = parts.length === 1 ? parts[0] : `${parts.slice(0, -1).join(", ")} and ${parts.at(-1)}`;
+  return `${text[0].toUpperCase()}${text.slice(1)}, `;
+}
+
 const live = {
   open: false,
   phase: "idle",
   muted: false,
   level: 0,
+  pitch: 0.4,
   floor: 0.004,
   pace: 1,
   orb: null,
@@ -1436,7 +1470,11 @@ const live = {
     this.muted = false;
     barOrb.pause();
     welcomeOrb.pause();
-    this.clearStage();
+    this.clearStage(true);
+    // anything attached in the chat goes with the first thing you say
+    this.staged = staged.splice(0);
+    renderStaged();
+    this.renderTray();
     $("#live-mute").setAttribute("aria-pressed", "false");
     $("#live-mute-label").textContent = "Mute";
     $("#live-log").replaceChildren(el("li", "empty", "Say something when you're ready. What you say and what it answers will show here."));
@@ -1449,7 +1487,9 @@ const live = {
     syncWeb();
     this.orb ??= new SpeakingOrb($("#live-orb"));
     this.orb.levelSource = () => this.level;
+    this.orb.pitchSource = () => this.pitch;
     this.orb.analyser = player.analyser;
+    this.wearOrb();
     this.orb.state = "listening";
     this.orb.endLine();
     this.orb.start();
@@ -1471,6 +1511,9 @@ const live = {
       const sink = this.ctx.createGain();
       sink.gain.value = 0; // the worklet only runs when connected through to the output
       source.connect(this.tap).connect(sink).connect(this.ctx.destination);
+      this.mic = this.ctx.createAnalyser(); // for the orbs that trace your voice
+      this.mic.fftSize = 1024;
+      source.connect(this.mic);
       this.rate = this.ctx.sampleRate;
       this.pre = [];
       this.speech = null;
@@ -1483,11 +1526,18 @@ const live = {
     }
   },
 
+  // the orb picked in the top bar: the lab's own, or one from VoiceOrbs
+  wearOrb() {
+    const id = prefs.get("liveOrb", LAB);
+    $("#live-orb-pick").value = id;
+    if (this.orb) wear(this.orb, id, () => (this.phase === "speaking" || !this.mic ? player.analyser : this.mic));
+  },
+
   release() {
     try { this.tap?.port && (this.tap.port.onmessage = null); } catch {}
     this.stream?.getTracks().forEach((t) => t.stop());
     this.ctx?.close().catch(() => {});
-    this.stream = this.ctx = this.tap = null;
+    this.stream = this.ctx = this.tap = this.mic = null;
   },
 
   async end() {
@@ -1502,6 +1552,9 @@ const live = {
     cancelAnimationFrame(this.glowFrame);
     $("#live").hidden = true;
     document.body.classList.remove("live-on");
+    staged.push(...this.staged); // not sent yet: back to the message box
+    this.staged = [];
+    renderStaged();
     showSide(!side.hidden && sideTab === "log" ? "log" : null); // the log can stay open beside the chat
     for (const n of $$("body > :not(#live)")) n.inert = false;
     this.phase = "idle";
@@ -1530,37 +1583,84 @@ const live = {
     this.glowFrame = requestAnimationFrame(() => this.glow());
   },
 
-  // a new turn starts with a clean stage: no old words, step or page
-  clearStage() {
+  // A new turn starts with a clean stage: no old words, step or page. Something you attached
+  // stays up while you talk about it, until another card takes its place.
+  clearStage(all = false) {
     this.lastYou = null;
     const you = $("#live-you");
     you.textContent = "";
     you.classList.remove("pending");
     $("#live-step").className = "live-step off";
-    $("#live-card").hidden = true;
+    const card = $("#live-card");
+    if (all || !card.classList.contains("shown")) card.hidden = true;
   },
-  showStep(kind, label, line, web) {
+  showStep(kind, label, line, web, tool) {
     const step = $("#live-step");
     step.className = `live-step ${kind}${web ? " web" : ""}`;
+    workingOrb($(".tool-icon", step), kind === "pending" ? tool : null, web);
     $("b", step).textContent = label;
     $(".live-step-line", step).textContent = line;
   },
   showCard(src, name, result) {
     const card = $("#live-card"), img = $("img", card);
     const [title, source] = shotCaption(name, result);
+    card.classList.remove("shown");
+    card.title = "What the browser showed. Opens full size.";
     card.href = src;
     img.src = src;
     img.alt = `Screenshot: ${title}`;
+    img.hidden = false;
+    $("video", card).hidden = true;
+    $("video", card).removeAttribute("src");
     $("b", card).textContent = title;
     $("small", card).textContent = source;
     card.hidden = false;
+  },
+  // the photo or video you sent, beside the orb while you talk about it
+  showShown(item) {
+    const card = $("#live-card"), img = $("img", card), video = $("video", card);
+    if (!["image", "video"].includes(item.kind)) return;
+    card.classList.add("shown");
+    card.title = "What you attached. Opens full size.";
+    card.href = item.url;
+    img.hidden = item.kind !== "image";
+    video.hidden = item.kind !== "video";
+    if (item.kind === "image") { img.src = item.url; img.alt = item.name; video.removeAttribute("src"); }
+    else { video.src = item.url; video.play().catch(() => {}); }
+    $("b", card).textContent = item.name;
+    $("small", card).textContent = item.kind === "image" ? "Your photo" : "Your video";
+    card.hidden = false;
+  },
+
+  staged: [], // attachments that go with the next thing you say
+  attach(files) {
+    for (const file of files) {
+      if (!guessKind(file)) { this.addLog("failed", "Didn't work", `${file.name} isn't an image, audio recording or video.`); continue; }
+      this.staged.push(makeItem(file));
+    }
+    this.renderTray();
+  },
+  renderTray() {
+    if (!this.open) return;
+    const tray = $("#live-tray");
+    tray.hidden = !this.staged.length;
+    tray.replaceChildren(...this.staged.map((item) => chipFor(item, () => {
+      this.staged = this.staged.filter((s) => s !== item);
+      this.renderTray();
+      $("#live-attach").focus();
+    }, item.error || item.info ? itemDetail(item) + (item.error ? "" : ". Goes with what you say next.") : "Preparing…")));
+    if (this.phase === "listening") $("#live-state").textContent = this.listeningText();
+  },
+  listeningText() {
+    const ready = this.staged.filter((s) => !s.error).length;
+    return ready ? `Listening. Ask about ${ready === 1 ? "it" : "them"}.` : PHASE_TEXT.listening;
   },
 
   setPhase(phase, text) {
     if (phase === "hearing") this.clearStage();
     this.phase = phase;
     $("#live").dataset.phase = phase;
-    $("#live-state").textContent = text || PHASE_TEXT[phase] || "";
+    $("#live-state").textContent = text || (phase === "listening" ? this.listeningText() : PHASE_TEXT[phase]) || "";
     if (this.orb) this.orb.state = ORB_STATE[phase] || "listening";
     this.refresh();
   },
@@ -1582,6 +1682,10 @@ const live = {
     const rms = Math.sqrt(sum / samples.length);
     this.level += (Math.min(1, rms * 10) - this.level) * 0.35;
     if (this.muted) { this.level = 0; return; }
+    if (this.phase === "hearing") {
+      const f = pitchOf(samples, this.rate);
+      if (f != null) this.pitch += (f - this.pitch) * 0.3;
+    }
     this.pre.push(samples);
     if (this.pre.length > VAD.preFrames) this.pre.shift();
 
@@ -1632,16 +1736,30 @@ const live = {
     if (voiced < VAD.minVoiced) { this.listen(); return; }
     this.setPhase("sending");
     const seconds = chunks.length * FRAME;
-    const you = this.addLog("you", "You", `Voice, ${fmtClock(seconds)}`, true);
+    // What you attached goes in the same message as your voice, just before it, so the
+    // model takes "this" to mean the new photo rather than one from earlier.
+    const shown = this.staged.filter((s) => !s.error);
+    this.staged = this.staged.filter((s) => s.error);
+    this.renderTray();
+    const you = this.addLog("you", "You", `${shownWords(shown)}${fmtClock(seconds)}`, true);
+    if (shown.length) {
+      const row = el("div", "live-thumbs");
+      for (const s of shown) { const t = el("span", "thumb"); t.append(thumb(s.kind, s.url)); row.append(t); }
+      $("p", you).before(row);
+      const pic = shown.find((s) => s.kind === "image" || s.kind === "video");
+      if (pic) this.showShown(pic);
+    }
     this.lastYou = you;
     $("#live-you").textContent = "…";
     $("#live-you").classList.add("pending");
-    if (!(await waitIdle())) { this.fail("The last reply is still going. Try again in a moment."); return; }
+    const giveBack = () => { this.staged.unshift(...shown); this.renderTray(); };
+    if (!(await waitIdle())) { giveBack(); this.fail("The last reply is still going. Try again in a moment."); return; }
     const item = makeItem(wavFile(chunks, this.rate), true);
     item.promise.then(() => { if (item.info) this.yours.set(item.info.id, you); });
     this.reply = null;
     this.text = "";
-    const sent = await send({ text: "", items: [item], reply: "voice", clear: false, hooks: this.hooks });
+    const sent = await send({ text: "", items: [...shown, item], reply: "voice", clear: false, hooks: this.hooks });
+    if (!sent) giveBack();
     if (!sent && this.phase === "sending") this.fail("That didn't send. Say it again.");
   },
 
@@ -1688,7 +1806,7 @@ const live = {
       perf.toolCall(name);
       const web = WEB_TOOLS.has(name);
       live.setPhase(web ? (name === "web_search" ? "searching" : "reading") : "thinking");
-      live.showStep("pending", TOOL_PENDING[name] || name, toolDetail(name, args, null), web);
+      live.showStep("pending", TOOL_PENDING[name] || name, toolDetail(name, args, null), web, name);
       live.step = live.addLog(`step${web ? "" : " local"}`, null, `${TOOL_PENDING[name] || name}: ${toolDetail(name, args, null)}`);
       live.text = "";
       live.reply = null;
@@ -1766,6 +1884,11 @@ const live = {
 
 $$(".live-open").forEach((b) => b.addEventListener("click", () => live.start()));
 $("#live-end").addEventListener("click", () => live.end());
+$("#live-orb-pick").append(...ORB_CHOICES.map(([id, name]) => { const o = el("option", null, name); o.value = id; return o; }));
+$("#live-orb-pick").addEventListener("change", (e) => {
+  prefs.set("liveOrb", e.target.value);
+  live.wearOrb();
+});
 $("#live-interrupt").addEventListener("click", async () => {
   await live.interrupt();
   live.listen();
@@ -1778,6 +1901,12 @@ $("#live-mute").addEventListener("click", () => {
   live.stream?.getAudioTracks().forEach((t) => (t.enabled = !live.muted));
   if (live.muted && live.phase === "hearing") { live.speech = null; live.listen(); }
   else if (["listening", "muted"].includes(live.phase)) live.listen();
+});
+
+$("#live-attach").addEventListener("click", () => $("#live-file").click());
+$("#live-file").addEventListener("change", (e) => {
+  live.attach([...e.target.files]);
+  e.target.value = "";
 });
 
 $("#live-talk").addEventListener("click", () => toggleSide("talk"));
@@ -1857,7 +1986,7 @@ narrow.addEventListener("change", fitPlaceholder);
 fitPlaceholder();
 
 // ---------- go ----------
-window.lfm3 = { live, player, barOrb, perf }; // for the UI test
+window.lfm3 = { live, player, barOrb, perf, mediaKind: (id) => mediaInfo.get(id)?.kind }; // for the UI test
 syncWeb();
 loadOptions();
 updateFootNote();

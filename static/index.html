@@ -204,6 +204,7 @@
     <header class="live-top">
       <h2>Live conversation</h2>
       <div class="live-top-actions">
+        <label class="orb-pick" title="How the orb looks. VoiceOrbs by Alexis Munoz, MIT."><span>Orb</span><select id="live-orb-pick"></select></label>
         <button type="button" class="btn small" id="live-talk" aria-expanded="false" aria-controls="side">Conversation</button>
         <button type="button" class="btn small" id="live-logs" aria-expanded="false" aria-controls="side">Log</button>
         <button type="button" class="btn small" id="live-stats" aria-pressed="true" aria-controls="live-perf">Performance</button>
@@ -221,16 +222,23 @@
       <div class="live-orb" id="live-orb"></div>
       <a class="live-card media-card" id="live-card" hidden target="_blank" rel="noopener" title="What the browser showed. Opens full size.">
         <img alt="">
+        <video muted playsinline loop preload="metadata" hidden></video>
         <span class="shot-caption"><b></b><small></small></span>
       </a>
     </div>
     <div class="live-dock">
+      <div class="staged live-tray" id="live-tray" hidden></div>
       <p class="live-state" id="live-state" aria-live="polite">Starting the microphone</p>
       <div class="live-buttons">
         <button type="button" class="btn round" id="live-mute" aria-pressed="false">
           <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5.5 11a6.5 6.5 0 0 0 13 0M12 17.5V21"/></svg>
           <span id="live-mute-label">Mute</span>
         </button>
+        <button type="button" class="btn round" id="live-attach" aria-describedby="live-tray" title="A photo, video or recording to go with what you say next. You can also drop or paste one here.">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3.5" y="5" width="17" height="14" rx="3"/><circle cx="9" cy="10" r="1.6"/><path d="m20.5 15.5-4.5-4.5-8 8"/></svg>
+          <span>Attach</span>
+        </button>
+        <input type="file" id="live-file" accept="image/*,video/*,audio/*,.heic,.heif" multiple hidden>
         <button type="button" class="btn round" id="live-interrupt" disabled>
           <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="7" y="7" width="10" height="10" rx="2"/></svg>
           <span>Interrupt</span>

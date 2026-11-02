@@ -275,12 +275,22 @@ def main():
 
     # Spoken questions, made with macOS text to speech (AIFF also tests another audio format)
     spoken = {}
-    for key, line in {"moon": "Tell me one fun fact about the moon.", "time": "What time is it in Tokyo right now?"}.items():
+    for key, line, voice in [("moon", "Tell me one fun fact about the moon.", None), ("time", "What time is it in Tokyo right now?", None),
+                             # Fred's voice is one the model followed less than its own earlier answers
+                             ("story", "Tell me a story.", "Fred")]:
         aiff = tmp / f"{key}.aiff"
-        subprocess.run(["say", "-o", str(aiff), line], capture_output=True)
+        subprocess.run(["say", *(["-v", voice] if voice else []), "-o", str(aiff), line], capture_output=True)
         code, item = upload(aiff, voice=True)
         spoken[key] = item if code == 200 else None
     check("upload: spoken questions as voice messages", all(v and v["voice"] for v in spoken.values()), spoken)
+    # a second picture, nothing like the sign
+    from PIL import Image, ImageDraw
+    circle_png = tmp / "circle.png"
+    picture = Image.new("RGB", (640, 400), "white")
+    ImageDraw.Draw(picture).ellipse((220, 100, 420, 300), fill=(220, 30, 30))
+    picture.save(circle_png)
+    code, circle = upload(circle_png)
+    check("upload: a second image", code == 200 and circle["kind"] == "image", circle)
 
     # ---- start
     t = time.time()
@@ -328,6 +338,10 @@ def main():
                    media=[speech["id"]], history=h, must_contain=["electrician", "Thursday"], tools_used=[])
     turn("context: earlier image still known after an audio turn", "What did the sign in the first picture say?",
          history=h, must_contain=["CAFE"])
+    # With the sign still in view, "What's in this picture?" about a new photo described the sign.
+    _, done, _ = turn("image: a new picture is the one described", "What's in this picture?", media=[circle["id"]],
+                      history=h, must_contain=["circle"])
+    check("image: ...not the earlier sign", "cafe" not in done.get("text", "").lower(), done.get("text", "")[:160])
     if heic_item:
         turn("image: HEIC photo", "What does the sign say?", media=[heic_item["id"]], must_contain=["CAFE"])
     turn("audio: webm recording", "Transcribe this recording word for word.", media=[webm_item["id"]],
@@ -353,10 +367,25 @@ def main():
     check("voice: speech starts streaming soon after the tool", first_audio - tool_at < 2.0,
           f"tool result at {tool_at:.1f}s, first audio at {first_audio:.1f}s")
     said = next((e for e in events if e.get("event") == "transcript"), {})
-    check("voice: the voice message is transcribed after the reply",
-          said.get("media") == voice_note["id"] and "electrician" in said.get("text", "").lower(), said.get("text"))
+    first_out = next((e["_at"] for e in events if e.get("event") in ("token", "audio", "tool_call")), 99)
+    check("voice: the voice message is written down before it's answered",
+          said.get("media") == voice_note["id"] and "electrician" in said.get("text", "").lower() and said.get("_at", 99) < first_out,
+          f"{said.get('text')!r} at {said.get('_at', 0):.1f}s, answer starts at {first_out:.1f}s")
     turn("voice: a later turn knows what the voice message said", "Who did I say was coming, and on which day?",
          history=h, must_contain=["electrician", "Thursday"], tools_used=[])
+    # The user's conversation: it described itself, then gave the same description to something it
+    # couldn't make out, and then to a clear "Tell me a story". The transcript beside the audio fixed it.
+    identity = ("I am LFM3-Omni-2.2B, a Liquid Foundation Model with about 2.2 billion parameters, created by Liquid AI. "
+                "I can take text, images, audio, and video as input and produce text and speech as output.")
+    alike = [{"role": "user", "text": "Hello.", "media": []},
+             {"role": "assistant", "content": "Hello! What can I help you with today?"},
+             {"role": "user", "text": "Tell me about yourself.", "media": []},
+             {"role": "assistant", "content": identity},
+             {"role": "user", "text": "Suga for the song.", "media": []},
+             {"role": "assistant", "content": identity + " Liquid AI focuses on building capable, efficient foundation models for on-device intelligence."}]
+    _, done, _ = turn("voice: after two answers alike, a spoken request gets its own answer", "", media=[spoken["story"]["id"]],
+                      history=alike, web=True, tools_used=[], spoken=True)
+    check("voice: ...a story, not the same description again", "liquid ai" not in done.get("text", "").lower(), done.get("text", "")[:160])
     turn("voice: spoken question without a tool", "", media=[spoken["moon"]["id"]], must_contain=["moon"],
          tools_used=[], spoken=True)
     _, _, events = turn("voice: spoken question that needs a tool", "", media=[spoken["time"]["id"]],
@@ -446,6 +475,17 @@ def main():
           (done.get("stats") or {}).get("finish") == "cancelled" and streamed_seconds(events) < 15
           and time.time() - spoken_job.get("sent", 0) < 30,
           f"{streamed_seconds(events):.1f}s of speech streamed before it stopped")
+
+    # Stopped before the answer starts, while the voice message is still being written down
+    aiff = tmp / "stop_early.aiff"
+    subprocess.run(["say", "-o", str(aiff), "Tell me a long story about a lighthouse keeper."], capture_output=True)
+    _, early = upload(aiff, voice=True)
+    _, events = chat("", media=[early["id"]], reply="voice", max_tokens=2000,
+                     on_event=lambda e: e.get("event") == "started" and call("POST", f"/api/cancel/{e['id']}"))
+    done = final(events)
+    check("Stop works while a voice message is being written down",
+          (done.get("stats") or {}).get("finish") == "cancelled" and streamed_seconds(events) == 0
+          and not any(e.get("event") == "token" for e in events), [e.get("event") for e in events])
 
     # ---- the 32K context
     filler = "The quick brown fox jumps over the lazy dog near the riverbank while seven tailors stitch a kandura. " * 60

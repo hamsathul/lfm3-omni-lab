@@ -1,0 +1,255 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Orbs: LFM3-Omni</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Ccircle cx='8' cy='8' r='7' fill='%235b8cff'/%3E%3C/svg%3E">
+  <link rel="stylesheet" href="/style.css">
+  <style>
+    .preview-top { display: flex; flex-wrap: wrap; align-items: center; gap: 0.5rem; }
+    .preview-top .btn[aria-pressed="true"] { background: var(--ink); border-color: var(--ink); color: #fff; }
+    .states { display: flex; flex-wrap: wrap; justify-content: center; gap: 0.35rem; max-width: 46rem; }
+    .states .btn[aria-pressed="true"] { border-color: var(--ink); box-shadow: inset 0 0 0 1px var(--ink); }
+    #play { background: var(--ink); border-color: var(--ink); color: #fff; }
+    .credit { margin: 0.4rem 0 0; font-size: 0.75rem; color: var(--ink-3); text-align: center; }
+    .credit a { color: inherit; }
+    .all {
+      grid-row: 3; overflow-y: auto; padding: 0.5rem 1.5rem 1rem;
+      display: grid; grid-template-columns: repeat(auto-fill, minmax(9.5rem, 1fr)); gap: 0.25rem 0.75rem; align-content: start;
+    }
+    .all[hidden] { display: none; }
+    .all button {
+      display: grid; justify-items: center; gap: 0.2rem; padding: 0.4rem 0 0.5rem;
+      border: 1px solid transparent; border-radius: 1rem; background: none; cursor: pointer;
+      font: 600 0.8125rem/1.2 var(--text); color: var(--ink-2);
+    }
+    .all button:hover { border-color: var(--line-2); background: rgba(255, 255, 255, 0.6); }
+    .all button[aria-current="true"] { border-color: var(--ink); color: var(--ink); }
+    .all .cell { width: 8.5rem; height: 8.5rem; display: grid; place-items: center; position: relative; }
+    .all .cell .speaking-orb-root { width: 8.5rem; }
+    .live.grid .live-main { display: none; }
+  </style>
+</head>
+<body class="live-on">
+  <section class="live" id="live" data-phase="listening" aria-label="Orb preview">
+    <div class="edge" aria-hidden="true"></div>
+    <header class="live-top">
+      <h2>Orbs</h2>
+      <div class="live-top-actions preview-top">
+        <label class="orb-pick"><span>Orb</span><select id="pick"></select></label>
+        <button type="button" class="btn small" id="view" aria-pressed="false">All orbs</button>
+        <button type="button" class="btn small primary" id="play">Play a turn</button>
+        <button type="button" class="btn small" id="use">Use in live mode</button>
+      </div>
+    </header>
+    <div></div>
+    <div class="live-main">
+      <p class="live-you" id="you" dir="auto"></p>
+      <p class="live-step off" id="step"><span class="tool-icon" aria-hidden="true"></span><b></b><span class="live-step-line"></span></p>
+      <div class="live-orb" id="orb"></div>
+    </div>
+    <div class="all" id="all" hidden></div>
+    <div class="live-dock">
+      <p class="live-state" id="state" aria-live="polite"></p>
+      <div class="states" id="states"></div>
+      <p class="credit">The sample voice plays both sides. Orbs from <a href="https://voiceorbs.vercel.app/">VoiceOrbs</a> by Alexis Munoz, step orbs from <a href="https://libraries.dev/orbs">Thinking Orbs</a> by Jakub Antalik, both MIT.</p>
+    </div>
+  </section>
+
+<script type="module">
+import { SpeakingOrb, pitchOf } from "./orb.js";
+import { wear, ORB_CHOICES, LAB, VO_STATE, verbOrb, loadVoiceOrbs } from "./orb-skins.js";
+
+const $ = (s, r = document) => r.querySelector(s);
+const SAID = "Hi, this is a quick test. Please remind me to call the electrician on Thursday at 3 in the afternoon.";
+// phase: [orb state, what the dock says]
+const PHASES = {
+  listening: ["listening", "Listening"],
+  hearing: ["hearing", "Hearing you"],
+  sending: ["gathering", "Got it"],
+  thinking: ["thinking", "Thinking"],
+  searching: ["searching", "Searching the web"],
+  reading: ["reading", "Reading a page"],
+  speaking: ["speaking", "Speaking"],
+  done: ["done", "Saved"],
+  muted: ["muted", "Muted. Unmute to talk."],
+  error: ["error", "Something went wrong. Say it again."],
+};
+
+const ctx = new AudioContext();
+const analyser = ctx.createAnalyser();
+analyser.fftSize = 1024;
+analyser.connect(ctx.destination);
+const clip = fetch("/samples/speech.wav").then((r) => r.arrayBuffer()).then((b) => ctx.decodeAudioData(b));
+
+const orb = new SpeakingOrb($("#orb"));
+let level = 0, pitch = 0.4, phase = "listening", playing = null;
+const grid = []; // every orb at once, when that view is open
+orb.levelSource = () => level;
+orb.pitchSource = () => pitch;
+orb.analyser = analyser;
+orb.start();
+const current = () => new URLSearchParams(location.search).get("orb") || JSON.parse(localStorage.getItem("lfm3.liveOrb") || '"lab"');
+let chosen = current();
+
+// your voice: the clip's level and pitch while it plays as "you"; a quiet room otherwise
+const buf = new Float32Array(analyser.fftSize);
+(function listen() {
+  let target = 0.02;
+  if (playing === "you") {
+    analyser.getFloatTimeDomainData(buf);
+    let s = 0;
+    for (const v of buf) s += v * v;
+    target = Math.min(1, Math.sqrt(s / buf.length) * 10);
+    const f = pitchOf(buf, ctx.sampleRate);
+    if (f != null) pitch += (f - pitch) * 0.3;
+  }
+  level += (target - level) * 0.35;
+  for (const g of grid) g.frame();
+  requestAnimationFrame(listen);
+})();
+
+async function play(as) {
+  await ctx.resume();
+  const src = ctx.createBufferSource();
+  src.buffer = await clip;
+  src.connect(analyser);
+  const t0 = ctx.currentTime;
+  playing = as;
+  if (as === "it") {
+    orb.beginLine(() => ctx.currentTime - t0, 1);
+    orb.setLineText(SAID);
+    orb.fitLine(src.buffer.duration);
+  }
+  src.start();
+  await new Promise((ok) => (src.onended = ok));
+  playing = null;
+}
+
+function setPhase(p) {
+  phase = p;
+  $("#live").dataset.phase = p;
+  orb.state = PHASES[p][0];
+  $("#state").textContent = PHASES[p][1];
+  for (const b of document.querySelectorAll("#states .btn")) b.setAttribute("aria-pressed", String(b.dataset.phase === p));
+}
+function step(kind, label, line, tool, web) {
+  const el = $("#step");
+  if (!kind) { el.className = "live-step off"; return; }
+  el.className = `live-step ${kind}${web ? " web" : ""}`;
+  $("b", el).textContent = label;
+  $(".live-step-line", el).textContent = line;
+  const icon = $(".tool-icon", el);
+  icon.querySelector(".verb-orb")?.remove();
+  icon.classList.toggle("has-orb", kind === "pending");
+  if (kind === "pending") icon.append(verbOrb(tool, 22, web ? [138, 83, 0] : [47, 91, 211]));
+}
+
+const wait = (s) => new Promise((ok) => setTimeout(ok, s * 1000));
+let run = 0;
+async function turn() {
+  const me = ++run, alive = () => me === run;
+  orb.endLine(); step(null); $("#you").textContent = "";
+  setPhase("listening"); await wait(2); if (!alive()) return;
+  setPhase("hearing"); $("#you").textContent = "…"; $("#you").classList.add("pending");
+  await play("you"); if (!alive()) return;
+  $("#you").classList.remove("pending"); $("#you").textContent = SAID;
+  setPhase("sending"); await wait(0.9); if (!alive()) return;
+  setPhase("thinking"); await wait(1.6); if (!alive()) return;
+  setPhase("searching"); step("pending", "Searching the web", "electrician near me", "searching", true); await wait(2.6); if (!alive()) return;
+  setPhase("reading"); step("pending", "Opening a page", "example.com/electricians", "connecting", true); await wait(2.6); if (!alive()) return;
+  step("done", "Read a page", "example.com/electricians", null, true);
+  setPhase("thinking"); step("pending", "Saving a reminder", "Call the electrician, Thursday 15:00", "working", false); await wait(1.4); if (!alive()) return;
+  step("done", "Saved a reminder", "Call the electrician, Thursday 15:00", null, false);
+  setPhase("speaking"); await play("it"); if (!alive()) return;
+  setPhase("done"); await wait(1.6); orb.endLine(); if (!alive()) return;
+  step(null); $("#you").textContent = "";
+  setPhase("listening"); await wait(1.6); if (!alive()) return;
+  setPhase("muted"); await wait(2.2); if (!alive()) return;
+  setPhase("error"); await wait(2.4); if (!alive()) return;
+  setPhase("listening");
+}
+
+// one button per state; "you talking" and "speaking" play the clip
+for (const p of Object.keys(PHASES)) {
+  const b = document.createElement("button");
+  b.type = "button"; b.className = "btn small"; b.dataset.phase = p; b.textContent = PHASES[p][1].split(".")[0];
+  b.addEventListener("click", async () => {
+    run++; orb.endLine(); step(null);
+    setPhase(p);
+    if (p === "hearing") await play("you");
+    if (p === "speaking") await play("it");
+  });
+  $("#states").append(b);
+}
+$("#play").addEventListener("click", turn);
+
+// the picker, and every orb at once
+for (const [id, name] of ORB_CHOICES) {
+  const o = document.createElement("option");
+  o.value = id; o.textContent = name;
+  $("#pick").append(o);
+}
+async function choose(id) {
+  chosen = id;
+  $("#pick").value = id;
+  for (const b of document.querySelectorAll("#all button")) b.setAttribute("aria-current", String(b.dataset.id === id));
+  await wear(orb, id, () => analyser);
+}
+$("#pick").addEventListener("change", (e) => choose(e.target.value));
+$("#use").addEventListener("click", () => {
+  localStorage.setItem("lfm3.liveOrb", JSON.stringify(chosen));
+  $("#use").textContent = "Used in live mode";
+  setTimeout(() => ($("#use").textContent = "Use in live mode"), 1600);
+});
+
+let built = false;
+async function buildGrid() {
+  if (built) return;
+  built = true;
+  const lib = await loadVoiceOrbs();
+  lib.useAnalyser(() => analyser);
+  for (const [id, name] of ORB_CHOICES) {
+    const b = document.createElement("button");
+    b.type = "button"; b.dataset.id = id;
+    b.setAttribute("aria-current", String(id === chosen));
+    b.innerHTML = `<span class="cell"></span><span>${name}</span>`;
+    b.addEventListener("click", () => { choose(id); showGrid(false); });
+    $("#all").append(b);
+    const cell = $(".cell", b);
+    if (id === LAB) {
+      const host = document.createElement("div");
+      host.className = "no-cap";
+      cell.append(host);
+      const small = new SpeakingOrb(host, { particles: 900, dots: 1.6 });
+      small.levelSource = () => level; small.pitchSource = () => pitch; small.analyser = analyser;
+      small.start();
+      grid.push({ frame() { small.state = orb.state; small.env = orb.env; } });
+    } else {
+      const m = lib.mountOrb(cell, id, { state: "listening", size: 104 });
+      let shown = "listening";
+      grid.push({ frame() {
+        const st = VO_STATE[orb.state] || "listening";
+        const live = st === "listening" ? level : st === "speaking" ? orb.env : -1;
+        m.levelRef.current = live < 0 ? -1 : Math.min(1, live);
+        if (st !== shown) { shown = st; m.set({ state: st }); }
+      } });
+    }
+  }
+}
+async function showGrid(on) {
+  $("#view").setAttribute("aria-pressed", String(on));
+  $("#live").classList.toggle("grid", on);
+  $("#all").hidden = !on;
+  if (on) await buildGrid();
+}
+$("#view").addEventListener("click", () => showGrid($("#all").hidden));
+
+setPhase("listening");
+choose(chosen);
+if (new URLSearchParams(location.search).has("all")) showGrid(true);
+window.preview = { turn, setPhase, choose, showGrid, orb };
+</script>
+</body>
+</html>

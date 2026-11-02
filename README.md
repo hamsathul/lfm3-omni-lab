@@ -75,12 +75,31 @@ Click the orb at the end of the message bar, or **Start a live conversation** on
 2. Your words go to the model as a voice message, and it answers out loud.
 3. When it finishes speaking, it listens again.
 
+To show it something, click **Attach**, drop a file on the window or paste one. A photo, video or recording waits above the buttons and goes out with the next thing you say, in the same message, so "what's this?" means the new one. While you talk about it, the photo stays beside the sphere. Anything already attached in the chat comes along into live mode, and anything you attached but didn't ask about goes back to the message box when live mode ends.
+
 While it works, a sphere of particles shows what it's doing:
 
-- grey and rippling with your voice while it listens;
+- grey and breathing slowly while it waits for you;
+- leaning toward you while you talk, with your voice running up it in ripples, finer for a higher voice;
+- pulled into a small, fast-turning core for a moment when your turn ends ("Got it");
 - a blue knot while it thinks;
-- amber rings while it searches the web;
-- a green sphere while it speaks, pulsing with the speech.
+- amber rings while it searches the web, and a page of lines with a scan line moving down it while it reads one;
+- a green sphere while it speaks, pulsing with the speech;
+- a flat grey disc while it's muted;
+- a red shudder that loosens and sags when something goes wrong.
+
+A change of state spreads across the sphere as a wave rather than all at once.
+
+**Orb** in the top bar swaps the sphere for one of 19 orbs from [VoiceOrbs](https://voiceorbs.vercel.app/) by Alexis Munoz (MIT), such as Siri sheet, Plasma or Nebula. They have fewer states than the sphere, so some share one look:
+
+- waiting and you talking both follow your voice;
+- "Got it", thinking, searching and reading share their thinking look;
+- speaking follows the reply's audio;
+- muted and errors have their own.
+
+The captions work the same with any of them, and the choice is remembered. These orbs are React components, so their file carries React (370 KB) and loads only when you pick one; Nebula's three.js scene (880 KB more) loads only when you pick Nebula.
+
+To compare them, open http://localhost:8765/orb-preview.html. **Play a turn** runs a sample conversation through every state with a recorded voice, **All orbs** shows all twenty at once, and **Use in live mode** picks the one shown.
 
 What you said appears in large type at the top once it's written down, with the tool it used underneath. Its words appear under the sphere as captions, and the particles fly into each word as it's spoken. When it opens a web page, a card with the page's screenshot appears beside the sphere. The edge of the window glows in the same colours as the sphere, brighter as you or it speaks.
 
@@ -104,11 +123,13 @@ Under the header, a row of figures shows how the last reply went:
 - **Let me talk over it** lets you cut in by speaking while it talks. Use headphones for this: through speakers it can hear itself.
 - **End** or Esc closes live mode and releases the microphone.
 
-The sphere is a light-mode port of [Speaking Orb](https://github.com/aqualang89/shipnotes-components) by Ship Notes (MIT), in `static/orb.js`.
+The sphere is a light-mode port of [Speaking Orb](https://github.com/aqualang89/shipnotes-components) by Ship Notes (MIT), in `static/orb.js`. The orbs from VoiceOrbs and [Thinking Orbs](https://libraries.dev/orbs) are built into `static/vendor/orbs`, with their licences; the README there says what was changed, and `tools/orbs/build.sh` rebuilds them. `static/orb-skins.js` connects them to the page.
 
 ### Tools
 
 The **Tools** switch under the message box lets the model call these. Each call shows as a card in the reply: open **Details** for the exact arguments and result.
+
+While a tool runs, its card shows a small dotted orb from [Thinking Orbs](https://libraries.dev/orbs) by Jakub Antalik (MIT), one for each kind of work: a turning globe for a web search, a constellation wiring itself for opening or following a page, scrambling bands for the calculator, and orbiting dots for the clock and reminders. Blue means a tool on your Mac, amber the web. A tick or a cross takes its place when the tool finishes. Live mode shows the same orb in the line under your words.
 
 | Tool | What it does |
 |---|---|
@@ -134,6 +155,9 @@ It's a 2-billion-parameter model.
 - It can slip on multi-step reasoning.
 - It can also write a wrong expression for the calculator. The calculator's example in the tool description is there to steer it.
 - In a spoken reply it answers right after one tool step: it won't search and then open a page before speaking.
+- With **Web** on it searches for things it doesn't need to, and it sometimes calls the clock when it should search or save a reminder.
+- In a later turn, a spoken percentage can lose its % sign on the way to the calculator: "What's seventeen and a half percent of 2,340?" came back as 40,950 (2 of 2). Typed, it works.
+- It sees photos and videos only from the latest message that brought any (see "How it works"). To compare two, send them together.
 - Its context holds 32K tokens, prompt and reply together. That's Liquid's stated figure; `config.json` lists 128,000 positions, but the app plans around 32K. An image can take up to 2,048 tokens. When a conversation outgrows the context, the earliest turns are left out (the reply says how many). A single message that's too long on its own, a long video say, is refused with the reason.
 
 ## How it works
@@ -158,7 +182,9 @@ Speech streams as it's made:
 - The first sound arrives about 0.3 seconds after speech starts. The model makes speech two to three times faster than real time, so playback doesn't run dry.
 - The whole reply is also saved as a WAV, which you can replay from the reply.
 
-After a voice message is answered, the model transcribes it while you listen to the reply. Later turns carry the transcript instead of the recording, which keeps long conversations fast.
+Before a voice message is answered, the model writes down what it says, so your words show up straight away. From the second turn on, the transcript goes in beside the recording. Later turns carry the transcript instead of the recording, which keeps long conversations fast.
+
+Photos and videos are shown to the model only from the latest message that brought any. Earlier ones are replaced by a short note, and what the model said about them stays in the conversation. To compare two photos, send them in the same message.
 
 The tool loop works like this:
 
@@ -175,6 +201,8 @@ A few prompt details matter with this model. Each one was found by testing:
 - **Spoken answers after a web search** get a note beside the results asking for two or three sentences and at most three results. Without it the model read out every title, and a list of five books ran to 35-50 seconds of speech. With it, answers came to 44-57 words in 12 of 12 tries. In the system prompt the same request worked half the time.
 - **An attached recording** is introduced with "Here is a recording:". Without that, "Transcribe this" on a recording that says "remind me to…" saves a reminder instead of transcribing.
 - **A video's soundtrack** is followed by a short note saying it belongs to the video. Without that, the model ignores the sound whenever tools are offered.
+- **After the first answer, a voice message goes in with its transcript beside it.** Without it, the model sometimes ignored what was said and copied an earlier answer. Asked "Tell me about yourself", then something it couldn't make out, it described itself both times, and then gave the same description to a clear "Tell me a story" (3 of 3 tries with Web on). With the transcript beside the audio it told a story (3 of 3). On a first turn the transcript isn't added: there it made spoken questions call the clock ("Tell me one fun fact about the moon", 4 of 4), and there's no earlier answer to copy. A note in the system prompt asking it to answer the latest message didn't help.
+- **Only the newest photos and videos are shown.** With an earlier photo still in view, "What's in this picture?" about a new one described the old one in 4 of 4 tries, and a note saying which photo was new didn't help. Showing only the newest got all 14 test turns right, follow-ups included, and the model still answered "What did the first sign say?" from its earlier reply.
 - **Transcripts of voice messages** use a system prompt that makes the model a transcription service. Without it, it answers a spoken question instead of writing it down: "What is 17 plus 25?" came back as "42".
 - **Very loud recordings are turned down.** The browser's automatic gain can push a live-mode turn up to full scale. At that level "What time is it in Tokyo right now?" was transcribed as "I don't know the current time in Tokyo." The same recording at 70% volume or lower came back word for word.
 - **There's no "use the tools" instruction** in the system prompt. The schemas are enough, and with such an instruction the model called the clock before unrelated spoken replies.
@@ -200,7 +228,8 @@ With the app running (model stopped or not):
 It drives the same API the page uses, with real media, and ends with the model stopped. It covers:
 
 - every attachment type, including webm and m4a recordings, a HEIC photo and a silent video;
-- multi-turn context, including media from earlier turns;
+- multi-turn context, including media from earlier turns, and a new photo being the one described rather than an earlier one;
+- a spoken question that follows two alike answers getting its own answer, not a copy;
 - each tool, plus checks that transcribing or summarizing a recording calls no tool;
 - spoken replies with and without tools, and that the streamed speech matches the saved file;
 - a reply it starts to write being asked to speak at once, and a spoken answer after a web search staying short;
@@ -209,7 +238,7 @@ It drives the same API the page uses, with real media, and ends with the model s
 - transcripts of voice messages, a later turn that relies on one, and a very loud live-mode recording (`tests/fixtures/loud_live_turn.wav`, a real voice kept out of the repository: put any recording of "What time is it in Tokyo?" there that peaks at full scale, or the check is skipped);
 - web search, opening a page, following a link, refusing local addresses, and Web being off unless asked for;
 - read-aloud in English and Arabic;
-- stopping a written or spoken answer, bad input and restarting;
+- stopping a written or spoken answer, including while a voice message is still being written down, bad input and restarting;
 - stopping the model mid-answer and recovering from a crashed model process.
 
 The web checks need an internet connection.

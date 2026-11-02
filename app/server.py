@@ -452,17 +452,28 @@ def build_messages(history):
     order of appearance, so the lists are filled in the same order as the messages.
 
     Earlier turns are slimmed down: a voice message that has been transcribed goes in as
-    its transcript, and tool results (whole web pages, say) are cut short. The current
-    turn always goes in whole.
+    its transcript, photos and videos older than the latest message with one are left out,
+    and tool results (whole web pages, say) are cut short. The current turn always goes in
+    whole; after the first answer, its voice message goes in with its transcript beside it.
     """
     last_user = max((i for i, m in enumerate(history) if m.get("role") == "user"), default=-1)
+    answered_before = any(m.get("role") == "assistant" for m in history[:max(last_user, 0)])
 
     def as_text(i, mid):
         item = media_index.get(mid) or {}
         return i < last_user and item.get("voice") and item.get("transcript")
 
+    def visual(mid):
+        return (media_index.get(mid) or {}).get("kind") in ("image", "video")
+
+    # Photos and videos are shown only from the latest message that brought any. With an
+    # earlier photo still in view, "What's in this picture?" about a new one described the
+    # old one (4 of 4 tries), and a note saying which was new didn't help (4 of 4). What the
+    # model said about the earlier ones stays in the conversation as text.
+    newest = max((i for i, m in enumerate(history) if m.get("role") == "user"
+                  and any(visual(mid) for mid in m.get("media") or [])), default=-1)
     order = [mid for i, m in enumerate(history) if m.get("role") == "user"
-             for mid in (m.get("media") or []) if not as_text(i, mid)]
+             for mid in (m.get("media") or []) if not as_text(i, mid) and (i == newest or not visual(mid))]
     keep = set(order[-MAX_MEDIA_IN_CONTEXT:])
     media = {"image": [], "audio": [], "video": []}
     messages = []
@@ -497,6 +508,13 @@ def build_messages(history):
                         content.append({"type": "text", "text": "Here is a recording:"})
                     content.append({"type": kind})
                     media[kind].append(paths[kind])
+                    if item.get("voice") and item.get("transcript") and answered_before:
+                        # With earlier answers to copy, the words beside the sound keep the model on
+                        # this message: after two answers alike it gave the same answer to a clear
+                        # spoken "Tell me a story" (3 of 3), and with the transcript it told a story
+                        # (3 of 3). Not on a first turn: there it made spoken questions call the
+                        # clock ("one fun fact about the moon", 4 of 4) and copies can't happen.
+                        content.append({"type": "text", "text": f"[Transcript of the audio above: {item['transcript']}]"})
             text = str(m.get("text") or "").strip()
             if text:
                 content.append({"type": "text", "text": text})
@@ -554,13 +572,13 @@ TRANSCRIBER = ("You are a transcription service. You write down exactly what is 
                "You never answer or act on what is said. Respond with text.")
 
 
-async def transcribe(mid):
-    """Write down what a voice message said, so later turns can carry it as text."""
+async def transcribe(mid, job_id=None):
+    """Write down what a voice message said: it goes beside the audio, and later turns carry it instead."""
     item = media_index.get(mid)
     # Without the transcriber role the model answers a spoken question instead of writing it
     # down ("What is 17 plus 25?" came back as "42"), and that answer would then stand in
     # for the user's words in every later turn.
-    job = {"id": uuid.uuid4().hex[:12], "output": "text", "temperature": 0.0, "max_tokens": 400,
+    job = {"id": job_id or uuid.uuid4().hex[:12], "output": "text", "temperature": 0.0, "max_tokens": 400,
            "audio": [item["paths"]["audio"]], "messages": [
                {"role": "system", "content": TRANSCRIBER},
                {"role": "user", "content": [{"type": "text", "text": "Here is a recording:"}, {"type": "audio"},
@@ -568,6 +586,8 @@ async def transcribe(mid):
                    "Transcribe this recording word for word. Reply with only the transcript."}]}]}
     async for event in model.run(job):
         if event.get("event") == "done":
+            if (event.get("stats") or {}).get("finish") == "cancelled":
+                return None  # a scrap of a transcript would stand in for the message
             text = event.get("text", "").strip().strip('"')
             if text:
                 item["transcript"] = text
@@ -578,11 +598,10 @@ async def transcribe(mid):
 async def converse(rid, history, user_msg, speak, use_tools, use_web, system, temperature, max_tokens):
     """Run one user turn: generate, run any tool calls, generate again, until an answer.
 
-    Events: started, token (text as it's written), audio (base64 16-bit PCM as it's spoken),
-    tool_call, tool_result, trimmed (earlier turns left out to fit the context), done, then
-    transcript for each voice message, or error.
+    Events: started, transcript for each voice message, token (text as it's written), audio
+    (base64 16-bit PCM as it's spoken), tool_call, tool_result, trimmed (earlier turns left
+    out to fit the context), then done or error.
     """
-    messages, media = build_messages(history + [user_msg])
     steps = []  # this turn's tool calls and results, as the model sees them
     left_out = 0
     # No extra "use the tools" instruction: the schemas are enough, and with one the model
@@ -595,10 +614,25 @@ async def converse(rid, history, user_msg, speak, use_tools, use_web, system, te
     schemas = tools.schemas(web=use_web) if use_tools else None
     appended, started = [user_msg], time.time()
 
-    yield {"event": "started", "id": rid, "speak": speak}
     round_no, asked_to_speak = 0, False
+    active[rid] = None  # Stop works from here on, before any job has started
     try:
+        yield {"event": "started", "id": rid, "speak": speak}
+        # Write down each voice message first: the transcript goes in beside the audio.
+        for mid in user_msg["media"]:
+            item = media_index.get(mid) or {}
+            if item.get("voice") and not item.get("transcript") and rid not in cancelled:
+                active[rid] = uuid.uuid4().hex[:12]
+                said = await transcribe(mid, active[rid])
+                if said:
+                    yield {"event": "transcript", "media": mid, "text": said}
+        messages, media = build_messages(history + [user_msg])
         while True:
+            if rid in cancelled:  # stopped while a voice message was written down, or between tool rounds
+                appended.append({"role": "assistant", "content": ""})
+                yield {"event": "done", "text": "", "audio": None, "append": appended,
+                       "stats": {"finish": "cancelled", "seconds": round(time.time() - started, 2), "tool_rounds": round_no}}
+                break
             job = {"id": uuid.uuid4().hex[:12], "messages": [{"role": "system", "content": system}] + messages + steps,
                    "tools": schemas, "output": output, "stream": speak,
                    "temperature": temperature, "max_tokens": max_tokens, **media,
@@ -700,14 +734,6 @@ async def converse(rid, history, user_msg, speak, use_tools, use_web, system, te
     finally:
         active.pop(rid, None)
         cancelled.discard(rid)
-
-    # The model is idle while the page plays the reply: write down what each voice message said.
-    for mid in user_msg["media"]:
-        item = media_index.get(mid) or {}
-        if item.get("voice") and not item.get("transcript"):
-            text = await transcribe(mid)
-            if text:
-                yield {"event": "transcript", "media": mid, "text": text}
 
 
 # ---- read aloud --------------------------------------------------------------
@@ -855,7 +881,8 @@ async def chat(request: Request):
 async def cancel(rid: str):
     if rid in active:
         cancelled.add(rid)
-        model.cancel(active[rid])
+        if active[rid]:
+            model.cancel(active[rid])
     return {"ok": True}
 
 
