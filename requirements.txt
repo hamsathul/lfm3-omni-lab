@@ -1,0 +1,5 @@
+mlx-vlm>=0.7.11
+fastapi>=0.110
+uvicorn>=0.29
+python-multipart>=0.0.9
+playwright>=1.50

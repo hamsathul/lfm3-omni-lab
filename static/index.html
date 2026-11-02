@@ -1,0 +1,239 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>LFM3-Omni</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cdefs%3E%3ClinearGradient id='g' x1='0' y1='0' x2='1' y2='1'%3E%3Cstop offset='0' stop-color='%235b8cff'/%3E%3Cstop offset='.5' stop-color='%23a77bff'/%3E%3Cstop offset='1' stop-color='%2319b886'/%3E%3C/linearGradient%3E%3C/defs%3E%3Ccircle cx='8' cy='8' r='7' fill='url(%23g)'/%3E%3Ccircle cx='8' cy='8' r='4' fill='%23fff' opacity='.85'/%3E%3C/svg%3E">
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body data-state="stopped" data-activity="">
+  <header class="top">
+    <div class="brand">
+      <h1>LFM3-Omni</h1>
+      <p class="model-id" id="model-id">LiquidAI/LFM3-Omni-2B-MLX-8bit</p>
+    </div>
+    <section class="engine" aria-label="Model">
+      <div class="engine-state" aria-live="polite">
+        <p class="state-word" id="state-word">Stopped</p>
+        <p class="state-detail" id="state-detail">Not loaded, so it uses no memory.</p>
+      </div>
+      <dl class="facts">
+        <div><dt>Memory</dt><dd id="fact-mem">–</dd></div>
+        <div><dt>Loaded in</dt><dd id="fact-load">–</dd></div>
+        <div><dt>Running for</dt><dd id="fact-up">–</dd></div>
+      </dl>
+      <div class="engine-actions">
+        <button type="button" class="btn primary small" id="btn-start">Start model</button>
+        <button type="button" class="btn small" id="btn-restart">Restart</button>
+        <button type="button" class="btn small" id="btn-stop">Stop</button>
+      </div>
+    </section>
+    <div class="top-actions">
+      <button type="button" class="btn small" id="new-chat">New chat</button>
+      <button type="button" class="btn small" id="open-settings" aria-expanded="false" aria-controls="settings">Settings</button>
+    </div>
+  </header>
+
+  <main class="stage" id="stage">
+    <p class="gate" id="gate">
+      <span>The model is stopped. Start it to begin.</span>
+      <button type="button" class="btn primary small" data-action="start">Start model</button>
+    </p>
+
+    <ol class="thread" id="thread" aria-live="polite"></ol>
+
+    <section class="welcome" id="welcome">
+      <div class="hero">
+        <div class="hero-orb no-cap" id="welcome-orb" aria-hidden="true"></div>
+        <h2>Have a conversation out loud</h2>
+        <p>Live mode waits for you to finish speaking, then answers in its own voice. The model runs on this Mac, and it only goes online when you turn on Web.</p>
+        <button type="button" class="btn primary big live-open">Start a live conversation</button>
+      </div>
+
+      <p class="samples-lead">Or try it on a sample:</p>
+      <div class="samples">
+        <button type="button" class="sample sample-photo" data-starter="photo">
+          <img src="/samples/sign.png" alt="" width="800" height="500">
+          <span>What does this sign say?</span>
+        </button>
+        <button type="button" class="sample sample-voice" data-starter="transcribe">
+          <canvas class="wave" id="sample-wave" aria-hidden="true"></canvas>
+          <span>Transcribe this 4.6-second voice memo, word for word</span>
+        </button>
+        <button type="button" class="sample sample-clip" data-starter="video">
+          <video src="/samples/clip.mp4#t=1.2" muted playsinline preload="metadata" aria-hidden="true"></video>
+          <span>What happens in this clip, and what can you hear?</span>
+        </button>
+      </div>
+
+      <ul class="more">
+        <li><button type="button" class="starter" data-starter="reminder">Ask for a reminder by voice<small>It saves the reminder with a tool and answers out loud.</small></button></li>
+        <li><button type="button" class="starter" data-starter="time">What time is it in Tokyo?<small>Uses the clock.</small></button></li>
+        <li><button type="button" class="starter" data-starter="web">Look up the latest Python release<small>Searches the web for this one message, even with Web off.</small></button></li>
+        <li><button type="button" class="starter" data-starter="aloud">Read a sentence aloud<small>In the model's own voice.</small></button></li>
+      </ul>
+    </section>
+  </main>
+
+  <form class="composer" id="composer">
+    <div class="staged" id="staged" hidden></div>
+    <div class="chips" id="suggestions" hidden></div>
+    <div class="bar" id="drop-zone">
+      <div class="edge" aria-hidden="true"></div>
+      <label class="icon-btn attach" title="Attach images, audio or video">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20.5 11.5 12.3 19.7a5 5 0 0 1-7.1-7.1l8.5-8.5a3.3 3.3 0 0 1 4.7 4.7l-8.5 8.5a1.7 1.7 0 0 1-2.4-2.4l7.8-7.8"/></svg>
+        <span class="sr-only">Attach</span>
+        <input type="file" id="file-input" class="sr-only" multiple accept="image/*,audio/*,video/*,.heic,.heif">
+      </label>
+      <label class="sr-only" for="input">Message</label>
+      <textarea id="input" rows="1" placeholder="Message LFM3-Omni, or attach an image, a recording or a video"></textarea>
+      <button type="button" class="icon-btn record" id="record" aria-pressed="false" title="Record a voice message">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5.5 11a6.5 6.5 0 0 0 13 0M12 17.5V21"/></svg>
+        <span class="record-label" id="record-label">Record</span>
+      </button>
+      <button type="submit" class="round-btn send" id="send" aria-label="Send" title="Send (Enter)">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 19V5M5.5 11.5 12 5l6.5 6.5"/></svg>
+      </button>
+      <button type="button" class="round-btn stop" id="stop-reply" hidden aria-label="Stop" title="Stop (Esc)">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="7" y="7" width="10" height="10" rx="2"/></svg>
+      </button>
+      <button type="button" class="orb-btn live-open" id="live-button" aria-label="Start a live conversation" title="Talk with it hands-free">
+        <span class="bar-orb no-cap" id="bar-orb"></span>
+      </button>
+    </div>
+    <div class="composer-foot">
+      <fieldset class="segmented reply-mode" title="How the model answers">
+        <legend>Reply</legend>
+        <span class="track">
+          <label title="Speaks back when you speak, writes back when you type"><input type="radio" name="reply" value="auto" checked> Auto</label>
+          <label><input type="radio" name="reply" value="text"> Text</label>
+          <label><input type="radio" name="reply" value="voice"> Voice</label>
+        </span>
+      </fieldset>
+      <label class="switch"><input type="checkbox" id="tools-on" checked> Tools</label>
+      <label class="switch" id="web-switch" title="Lets it search the web and read pages in a separate, signed-out Chrome"><input type="checkbox" id="web-on"> Web</label>
+      <span class="foot-note" id="foot-note"></span>
+    </div>
+  </form>
+
+  <aside class="settings" id="settings" hidden aria-label="Settings">
+    <div class="settings-head">
+      <h2>Settings</h2>
+      <button type="button" class="btn quiet small" id="close-settings">Close</button>
+    </div>
+    <div class="settings-body">
+      <section>
+        <h3>Behavior</h3>
+        <div class="field">
+          <div class="field-head">
+            <label for="system">System prompt</label>
+            <button type="button" class="btn quiet small" id="reset-system">Use the default</button>
+          </div>
+          <textarea id="system" rows="5"></textarea>
+        </div>
+        <div class="pair">
+          <label><span>Temperature <output id="temp-out">0</output></span>
+            <input type="range" id="temperature" min="0" max="1.2" step="0.1" value="0">
+          </label>
+          <label>Max reply length (tokens)
+            <input type="number" id="max-tokens" min="16" max="8192" step="16" value="1024">
+          </label>
+        </div>
+        <p class="hint">Temperature 0 always picks the most likely word, which the model card recommends for text.</p>
+        <div class="log-row">
+          <button type="button" class="btn small" id="log-toggle" aria-expanded="false" aria-controls="log-drawer">Show the model log</button>
+          <p class="hint">What the model process prints: loading, each request and any errors.</p>
+        </div>
+      </section>
+      <section>
+        <h3>Tools the model can call</h3>
+        <div class="tool-group">
+          <h4>On this Mac</h4>
+          <ul class="tool-list" id="tool-list-local"></ul>
+        </div>
+        <div class="tool-group">
+          <h4>On the web, when Web is on</h4>
+          <ul class="tool-list" id="tool-list-web"></ul>
+          <p class="hint">Pages open in a separate Chrome with an empty profile, so it's never signed in to anything, and it can't open addresses on this Mac or your network. With Web on, the model often searches for things it already knows.</p>
+        </div>
+        <div class="reminders">
+          <h4>Saved reminders</h4>
+          <ul id="reminder-list"></ul>
+          <button type="button" class="btn small" id="clear-reminders">Clear reminders</button>
+        </div>
+      </section>
+      <section>
+        <h3>Read aloud</h3>
+        <p class="hint">Used by the Read aloud button under each reply. Spoken replies use the model's own conversational voice, which can't be changed.</p>
+        <div class="pair">
+          <label>Language
+            <select id="tts-language"><option value="auto">Match the text</option></select>
+          </label>
+          <fieldset class="segmented">
+            <legend>Voice</legend>
+            <span class="track">
+              <label><input type="radio" name="tts-voice" value="female" checked> Female</label>
+              <label><input type="radio" name="tts-voice" value="male"> Male</label>
+            </span>
+          </fieldset>
+        </div>
+      </section>
+    </div>
+  </aside>
+
+  <aside class="log-drawer" id="log-drawer" hidden aria-label="Model log">
+    <div class="log-head">
+      <h2>Model log</h2>
+      <button type="button" class="btn quiet small" id="log-close">Close</button>
+    </div>
+    <pre class="log-body" id="log-body" tabindex="0"></pre>
+  </aside>
+
+  <section class="live" id="live" hidden aria-label="Live conversation" role="dialog" aria-modal="true" data-phase="idle">
+    <div class="edge" aria-hidden="true"></div>
+    <header class="live-top">
+      <h2>Live conversation</h2>
+      <div class="live-top-actions">
+        <button type="button" class="btn small" id="live-transcript" aria-expanded="false" aria-controls="live-sheet">Transcript</button>
+        <button type="button" class="btn small" id="live-end">End <kbd>Esc</kbd></button>
+      </div>
+    </header>
+    <div class="live-main">
+      <p class="live-you" id="live-you" dir="auto"></p>
+      <p class="live-step off" id="live-step"><span class="tool-icon" aria-hidden="true"></span><b></b><span class="live-step-line"></span></p>
+      <div class="live-orb" id="live-orb"></div>
+      <a class="live-card media-card" id="live-card" hidden target="_blank" rel="noopener" title="What the browser showed. Opens full size.">
+        <img alt="">
+        <span class="shot-caption"><b></b><small></small></span>
+      </a>
+    </div>
+    <div class="live-dock">
+      <p class="live-state" id="live-state" aria-live="polite">Starting the microphone</p>
+      <div class="live-buttons">
+        <button type="button" class="btn round" id="live-mute" aria-pressed="false">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5.5 11a6.5 6.5 0 0 0 13 0M12 17.5V21"/></svg>
+          <span id="live-mute-label">Mute</span>
+        </button>
+        <button type="button" class="btn round" id="live-interrupt" disabled>
+          <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="7" y="7" width="10" height="10" rx="2"/></svg>
+          <span>Interrupt</span>
+        </button>
+      </div>
+      <div class="live-switches">
+        <label class="switch"><input type="checkbox" id="live-web"> Web</label>
+        <label class="switch" title="It hears itself through speakers, so use headphones"><input type="checkbox" id="live-barge"> Let me talk over it (headphones)</label>
+      </div>
+    </div>
+    <aside class="live-sheet" id="live-sheet" hidden aria-label="Transcript">
+      <div class="live-sheet-head">
+        <h3>Transcript</h3>
+        <button type="button" class="btn quiet small" id="live-sheet-close">Close</button>
+      </div>
+      <ol class="live-log" id="live-log" aria-live="polite"></ol>
+    </aside>
+  </section>
+
+  <script src="/app.js" type="module"></script>
+</body>
+</html>

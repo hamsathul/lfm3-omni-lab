@@ -1,0 +1,7 @@
+.venv/
+data/
+__pycache__/
+*.pyc
+.DS_Store
+# a real person's voice, used by one smoke check; not published
+tests/fixtures/loud_live_turn.wav
