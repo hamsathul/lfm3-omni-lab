@@ -27,14 +27,20 @@ function fmtDuration(s) {
 const fmtClock = (s) => `${Math.floor(s / 60)}:${String(Math.floor(s % 60)).padStart(2, "0")}`;
 const hostOf = (url) => { try { return new URL(url).hostname.replace(/^www\./, ""); } catch { return url; } };
 
+const FINISH_NOTES = {
+  length: "hit the length limit",
+  cancelled: "stopped early",
+  noise: "speech cut where it turned to noise",
+  overrun: "speech cut, it ran past the text",
+};
+
 function statsLines(s) {
   if (!s) return [];
   const lines = [];
   if (s.audio_seconds) lines.push(`${s.audio_seconds.toFixed(1)} s of speech`);
   else if (s.tokens >= 4 && s.tokens_per_sec) lines.push(`${s.tokens} tokens, ${Math.round(s.tokens_per_sec)}/s`);
   lines.push(`took ${s.seconds.toFixed(1)} s`);
-  if (s.finish === "length") lines.push("hit the length limit");
-  if (s.finish === "cancelled") lines.push("stopped early");
+  if (FINISH_NOTES[s.finish]) lines.push(FINISH_NOTES[s.finish]);
   return lines;
 }
 
@@ -393,33 +399,85 @@ function openPanel(panel, button, open) {
 }
 $("#open-settings").addEventListener("click", () => {
   const open = $("#settings").hidden;
+  if (open && !side.hidden) showSide(null); // they share the right edge
   openPanel($("#settings"), $("#open-settings"), open);
   if (open) { loadReminders(); systemBox.focus(); }
 });
 $("#close-settings").addEventListener("click", () => openPanel($("#settings"), $("#open-settings"), false));
 
-// ---------- log drawer ----------
-let logSince = 0, logTimer = null;
+// ---------- side panel: the live conversation and the model log ----------
+// One panel on the right, below the top bar. In live mode it has two tabs, Conversation and
+// Log; in the chat it shows the log (the chat itself is the conversation).
+const side = $("#side");
+let sideTab = "log", logSince = 0, logTimer = null;
+const REPLY_LINE = /^(Written|Spoken|Read-aloud) reply: /;
+
 async function pullLogs() {
   try {
     const data = await (await fetch(`/api/logs?since=${logSince}`)).json();
     const body = $("#log-body");
     const atEnd = body.scrollTop + body.clientHeight >= body.scrollHeight - 30;
-    for (const entry of data.lines) body.append(el("span", `src-${entry.src}`, `${entry.line}\n`));
+    for (const entry of data.lines) {
+      const line = el("span", `src-${entry.src}`, entry.line);
+      if (REPLY_LINE.test(entry.line)) line.classList.add("reply");
+      if (/cut|limit|failed|more than the/.test(entry.line)) line.classList.add("trouble");
+      body.append(line);
+    }
     logSince = data.last;
     if (atEnd) body.scrollTop = body.scrollHeight;
   } catch {}
 }
-function toggleLog(open) {
-  openPanel($("#log-drawer"), $("#log-toggle"), open);
-  clearInterval(logTimer);
-  if (open) { pullLogs(); logTimer = setInterval(pullLogs, 1000); }
+
+function placeSide() {
+  const bar = live.open ? $("#live .live-top") : $(".top");
+  side.style.top = `${Math.round(bar.getBoundingClientRect().bottom) + 6}px`;
 }
+
+// tab: "talk" | "log" to show that tab, or null to close the panel
+function showSide(tab) {
+  if (tab === "talk" && !live.open) tab = null;
+  const open = Boolean(tab);
+  if (open) sideTab = tab;
+  const home = live.open ? $("#live") : document.body;
+  if (side.parentElement !== home) home.append(side);
+  side.hidden = !open;
+  for (const t of $$("[role=tab]", side)) {
+    const on = t.dataset.tab === sideTab;
+    t.setAttribute("aria-selected", String(on));
+    t.tabIndex = on ? 0 : -1;
+  }
+  $("#side-talk").hidden = sideTab !== "talk";
+  $("#side-log").hidden = sideTab !== "log";
+  const showing = (t) => String(open && sideTab === t);
+  for (const id of ["#open-log", "#log-toggle", "#live-logs"]) $(id).setAttribute("aria-expanded", showing("log"));
+  $("#live-talk").setAttribute("aria-expanded", showing("talk"));
+  document.body.classList.toggle("side-open", open);
+  $("#live").classList.toggle("with-side", open);
+  clearInterval(logTimer);
+  if (open && sideTab === "log") { pullLogs(); logTimer = setInterval(pullLogs, 1000); }
+  if (open) {
+    placeSide();
+    const list = sideTab === "talk" ? $("#live-log") : $("#log-body");
+    list.scrollTop = list.scrollHeight;
+  }
+  prefs.set(live.open ? "liveSide" : "side", open ? sideTab : "");
+}
+const toggleSide = (tab) => showSide(!side.hidden && sideTab === tab ? null : tab);
+
+$("#open-log").addEventListener("click", () => toggleSide("log"));
 $("#log-toggle").addEventListener("click", () => {
   openPanel($("#settings"), $("#open-settings"), false);
-  toggleLog($("#log-drawer").hidden);
+  toggleSide("log");
 });
-$("#log-close").addEventListener("click", () => toggleLog(false));
+$("#side-close").addEventListener("click", () => showSide(null));
+for (const t of $$("[role=tab]", side)) t.addEventListener("click", () => showSide(t.dataset.tab));
+$(".side-tabs").addEventListener("keydown", (e) => {
+  if (!["ArrowLeft", "ArrowRight"].includes(e.key) || !live.open) return;
+  const next = sideTab === "talk" ? "log" : "talk";
+  showSide(next);
+  $(`#tab-${next}`).focus();
+});
+window.addEventListener("resize", () => { if (!side.hidden) placeSide(); });
 
 // ---------- attachments ----------
 const IMAGE_EXT = /\.(png|jpe?g|gif|webp|bmp|tiff?|heic|heif)$/i;
@@ -869,6 +927,10 @@ class ReplyView {
     refreshControls();
     keepInView(near);
   }
+  note(text) {
+    this.margin.append(el("small", "trim-note", text));
+  }
+
   fail(message, retry) {
     this.waiting.hidden = true;
     this.settleSegment(this.segText);
@@ -1034,6 +1096,9 @@ async function runTurn(message, reply, opts) {
         }
         hooks?.done(event, session !== null || (Boolean(event.audio) && !cancelled));
         refreshControls();
+      } else if (kind === "trimmed") {
+        view.note(`Left out the ${event.left_out} earliest messages: with them the prompt was ${event.prompt_tokens.toLocaleString()} tokens, more than the model's 32K context.`);
+        hooks?.trimmed(event);
       } else if (kind === "transcript") {
         showTranscript(event.media, event.text);
         hooks?.transcript(event);
@@ -1228,6 +1293,131 @@ const PHASE_TEXT = {
 };
 const ORB_STATE = { listening: "listening", hearing: "listening", muted: "listening", sending: "thinking", thinking: "thinking", searching: "searching", reading: "searching", speaking: "speaking", done: "done", error: "listening" };
 
+// ---------- live mode: how each reply went ----------
+const PERF_TOOLS = {
+  get_current_time: "Clock", calculate: "Calculator", add_reminder: "Reminder", list_reminders: "Reminders",
+  web_search: "Web search", open_page: "Open page", click_link: "Follow link",
+};
+const SVG = "http://www.w3.org/2000/svg";
+const svgEl = (tag, attrs) => {
+  const node = document.createElementNS(SVG, tag);
+  for (const [k, v] of Object.entries(attrs)) node.setAttribute(k, v);
+  return node;
+};
+
+const perf = {
+  answers: [], // seconds from the end of your words to the first sound, oldest first
+  turn: null,
+  leftOut: 0,
+  reset() { this.answers = []; this.turn = null; this.render(null); },
+  begin(at) { this.turn = { at, tools: [], answered: null }; this.leftOut = 0; },
+  toolCall(name) { if (this.turn) this.turn.toolAt = [name, performance.now()]; },
+  toolResult() {
+    const t = this.turn;
+    if (!t?.toolAt) return;
+    t.tools.push([t.toolAt[0], (performance.now() - t.toolAt[1]) / 1000]);
+    t.toolAt = null;
+  },
+  firstSound() {
+    const t = this.turn;
+    if (t && t.answered === null) t.answered = (performance.now() - t.at) / 1000;
+  },
+  done(stats) {
+    if (!this.turn) return;
+    if (this.turn.answered !== null) this.answers = [...this.answers, this.turn.answered].slice(-12);
+    this.render(stats);
+    this.turn = null;
+  },
+  failed() { this.turn = null; },
+
+  render(stats) {
+    const list = $("#perf-list");
+    $("#perf-empty").hidden = Boolean(stats);
+    list.hidden = !stats;
+    if (!stats) return;
+    const t = this.turn || {};
+    const tile = (label, value, note, cls) => {
+      const d = el("div", cls);
+      const dd = el("dd", null, value);
+      if (note) dd.append(el("small", null, note));
+      d.append(el("dt", null, label), dd);
+      return d;
+    };
+    const tiles = [];
+    if (t.answered != null) {
+      const d = tile("Answered in", `${t.answered.toFixed(1)} s`, null, "answer");
+      d.title = "From the end of your words to its first sound";
+      const spark = this.spark();
+      if (spark) $("dd", d).append(spark);
+      tiles.push(d);
+    }
+    const made = stats.generate_seconds || stats.seconds;
+    if (stats.audio_seconds) {
+      // speech made per second once it started playing; under 1x, playback catches up and stutters
+      const pace = made ? stats.audio_seconds / Math.max(0.1, made - (stats.first_audio_seconds || 0)) : 0;
+      const slow = pace && pace < 1.15 && stats.audio_seconds > 3;
+      const d = tile("Speech", `${stats.audio_seconds.toFixed(1)} s`, pace ? `${pace.toFixed(1)}× real time` : null, slow ? "warn" : "");
+      d.title = slow ? "Made barely faster than it plays, so playback can stutter" : "How much faster than it plays the speech was made";
+      tiles.push(d);
+    }
+    if (stats.tokens_per_sec) {
+      const d = tile("Speed", `${Math.round(stats.tokens_per_sec)} tokens/s`);
+      d.title = `${stats.tokens.toLocaleString()} tokens in ${made.toFixed(1)} s`;
+      tiles.push(d);
+    }
+    for (const [name, secs] of t.tools || []) tiles.push(tile(PERF_TOOLS[name] || name, `${secs.toFixed(1)} s`));
+    if (stats.prompt_tokens) {
+      const max = stats.context_tokens || 32768, share = stats.prompt_tokens / max;
+      const level = share > 0.9 ? "bad" : share > 0.7 ? "warn" : "";
+      const d = tile("Context", `${stats.prompt_tokens.toLocaleString()} of ${Math.round(max / 1024)}K`, null, level);
+      d.title = "Prompt tokens out of the model's context, which holds the prompt and the reply together";
+      const meter = el("span", "meter");
+      meter.setAttribute("role", "meter");
+      meter.setAttribute("aria-label", "Context used");
+      meter.setAttribute("aria-valuemin", "0");
+      meter.setAttribute("aria-valuemax", String(max));
+      meter.setAttribute("aria-valuenow", String(stats.prompt_tokens));
+      meter.style.setProperty("--w", `${Math.min(100, share * 100).toFixed(1)}%`);
+      if (level) meter.style.setProperty("--m", level === "bad" ? "var(--fault)" : "var(--amber)");
+      meter.append(el("i"));
+      $("dd", d).append(meter);
+      tiles.push(d);
+    }
+    if (this.leftOut) tiles.push(tile("Left out", `${this.leftOut} messages`, "to fit", "warn"));
+    if (stats.peak_memory_gb) tiles.push(tile("Memory", `${stats.peak_memory_gb.toFixed(1)} GB`, "peak"));
+    if (FINISH_NOTES[stats.finish] && stats.finish !== "cancelled") tiles.push(tile("Ended", FINISH_NOTES[stats.finish], null, "bad"));
+    list.replaceChildren(...tiles);
+  },
+
+  // answer times across the conversation: a small line, the latest point in the accent
+  spark() {
+    const n = this.answers.length;
+    if (n < 2) return null;
+    const w = 72, h = 22, pad = 3, top = Math.max(...this.answers);
+    const x = (i) => pad + (i * (w - 2 * pad)) / (n - 1);
+    const y = (v) => h - pad - (v / top) * (h - 2 * pad);
+    const svg = svgEl("svg", { class: "spark", viewBox: `0 0 ${w} ${h}`, role: "img",
+      "aria-label": `Answer times so far, oldest first: ${this.answers.map((v) => `${v.toFixed(1)} s`).join(", ")}` });
+    svg.append(svgEl("polyline", { points: this.answers.map((v, i) => `${x(i).toFixed(1)},${y(v).toFixed(1)}`).join(" ") }));
+    this.answers.forEach((v, i) => {
+      const last = i === n - 1;
+      svg.append(svgEl("circle", { class: last ? "dot now" : "dot", cx: x(i), cy: y(v), r: last ? 3 : 2 }));
+      const hit = svgEl("circle", { class: "hit", cx: x(i), cy: y(v), r: 7 });
+      const title = svgEl("title", {});
+      title.textContent = `Reply ${i + 1}: answered in ${v.toFixed(1)} s`;
+      hit.append(title);
+      svg.append(hit);
+    });
+    return svg;
+  },
+};
+
+function showPerf(open) {
+  $("#live-perf").hidden = !open;
+  $("#live-stats").setAttribute("aria-pressed", String(open));
+  prefs.set("livePerf", open);
+}
+
 const live = {
   open: false,
   phase: "idle",
@@ -1247,12 +1437,14 @@ const live = {
     barOrb.pause();
     welcomeOrb.pause();
     this.clearStage();
-    toggleLiveSheet(prefs.get("liveSheet", false));
     $("#live-mute").setAttribute("aria-pressed", "false");
     $("#live-mute-label").textContent = "Mute";
     $("#live-log").replaceChildren(el("li", "empty", "Say something when you're ready. What you say and what it answers will show here."));
     $("#live").hidden = false;
     document.body.classList.add("live-on");
+    showSide(prefs.get("liveSide", "") || null); // moves the panel into the overlay
+    perf.reset();
+    showPerf(prefs.get("livePerf", !matchMedia("(max-width: 860px)").matches));
     for (const n of $$("body > :not(#live)")) n.inert = true; // keep Tab inside the overlay
     syncWeb();
     this.orb ??= new SpeakingOrb($("#live-orb"));
@@ -1310,6 +1502,7 @@ const live = {
     cancelAnimationFrame(this.glowFrame);
     $("#live").hidden = true;
     document.body.classList.remove("live-on");
+    showSide(!side.hidden && sideTab === "log" ? "log" : null); // the log can stay open beside the chat
     for (const n of $$("body > :not(#live)")) n.inert = false;
     this.phase = "idle";
     showWelcome();
@@ -1432,6 +1625,7 @@ const live = {
   },
 
   async utterance() {
+    perf.begin(performance.now() - this.quiet * FRAME * 1000); // when you stopped talking
     const chunks = this.speech.slice(0, this.speech.length - Math.max(0, this.quiet - 10));
     const voiced = this.voiced * FRAME;
     this.speech = null;
@@ -1491,6 +1685,7 @@ const live = {
       $("#live-log").scrollTop = $("#live-log").scrollHeight;
     },
     toolCall({ name, arguments: args }) {
+      perf.toolCall(name);
       const web = WEB_TOOLS.has(name);
       live.setPhase(web ? (name === "web_search" ? "searching" : "reading") : "thinking");
       live.showStep("pending", TOOL_PENDING[name] || name, toolDetail(name, args, null), web);
@@ -1499,6 +1694,7 @@ const live = {
       live.reply = null;
     },
     toolResult({ name, result, screenshot }) {
+      perf.toolResult(name);
       if (live.step) $("p", live.step).textContent = `${TOOL_LABELS[name] || name}: ${toolDetail(name, null, result)}`;
       live.showStep(result?.error ? "failed" : "done", TOOL_LABELS[name] || name, toolDetail(name, null, result), WEB_TOOLS.has(name));
       if (screenshot) live.showCard(screenshot, name, result);
@@ -1506,11 +1702,13 @@ const live = {
       if (name === "add_reminder" && !result?.error) live.saved = true;
     },
     speaking(clock) {
+      perf.firstSound();
       live.setPhase("speaking");
       live.orb.beginLine(clock, live.pace);
       live.orb.setLineText(live.text);
     },
     done(event, spoken) {
+      perf.done(event.stats);
       const said = (event.text || "").trim();
       if (said && live.reply) $("p", live.reply).textContent = said;
       else if (said) live.reply = live.addLog("it", "LFM3", said);
@@ -1555,7 +1753,12 @@ const live = {
         $("#live-you").classList.remove("pending");
       }
     },
+    trimmed({ left_out }) {
+      perf.leftOut = left_out;
+      live.addLog("step local", null, `Left out the ${left_out} earliest messages to fit the model's 32K context`);
+    },
     fail(message) {
+      perf.failed();
       if (live.open && live.phase !== "hearing") live.fail(message);
     },
   },
@@ -1577,15 +1780,9 @@ $("#live-mute").addEventListener("click", () => {
   else if (["listening", "muted"].includes(live.phase)) live.listen();
 });
 
-// the running transcript slides in from the side; whether it's open is remembered
-function toggleLiveSheet(open) {
-  $("#live-sheet").hidden = !open;
-  $("#live-transcript").setAttribute("aria-expanded", String(open));
-  $("#live").classList.toggle("with-sheet", open);
-  prefs.set("liveSheet", open);
-}
-$("#live-transcript").addEventListener("click", () => toggleLiveSheet($("#live-sheet").hidden));
-$("#live-sheet-close").addEventListener("click", () => toggleLiveSheet(false));
+$("#live-talk").addEventListener("click", () => toggleSide("talk"));
+$("#live-logs").addEventListener("click", () => toggleSide("log"));
+$("#live-stats").addEventListener("click", () => showPerf($("#live-perf").hidden));
 
 // ---------- starters on the empty screen ----------
 const STARTERS = {
@@ -1647,7 +1844,7 @@ document.addEventListener("keydown", (e) => {
   if (e.key !== "Escape") return;
   if (live.open) live.end();
   else if (!$("#settings").hidden) openPanel($("#settings"), $("#open-settings"), false);
-  else if (!$("#log-drawer").hidden) toggleLog(false);
+  else if (!side.hidden) showSide(null);
   else if (current || player.active) stopReply();
 });
 
@@ -1660,13 +1857,14 @@ narrow.addEventListener("change", fitPlaceholder);
 fitPlaceholder();
 
 // ---------- go ----------
-window.lfm3 = { live, player, barOrb }; // for the UI test
+window.lfm3 = { live, player, barOrb, perf }; // for the UI test
 syncWeb();
 loadOptions();
 updateFootNote();
 renderStaged();
 showWelcome();
 setActivity("");
+if (prefs.get("side", "") === "log") showSide("log");
 barOrb.start(); // draw it once; it settles and pauses
 drawSampleWave();
 pollStatus();

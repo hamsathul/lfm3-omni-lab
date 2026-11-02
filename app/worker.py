@@ -3,9 +3,12 @@
 It runs as its own process so that stopping it really frees the model's memory.
 
 Protocol, one JSON object per line:
-  stdin   {"id", "messages", "tools", "image", "audio", "video", "output", "max_tokens", "temperature", "stream"}
+  stdin   {"id", "messages", "tools", "image", "audio", "video", "output", "max_tokens", "temperature", "stream",
+           "min_reply_tokens" (optional: refuse the job unless this much room is left for the reply)}
           {"cmd": "cancel", "id"}
   stdout  {"event": "loading" | "ready" | "fatal" | "token" | "audio_chunk" | "done" | "error", ...}
+          An "error" with "code": "context" means the prompt doesn't fit the context; it carries
+          "prompt_tokens" so the app can leave out earlier turns and try again.
 Spoken replies stream: text as "token" events and 24 kHz speech as base64 16-bit PCM "audio_chunk" events.
 Anything a library prints is redirected to stderr, which the app shows as the model log.
 """
@@ -20,6 +23,10 @@ import threading
 import time
 import traceback
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))  # run as a script: make `app` importable
+from app.guards import CONTEXT_TOKENS, PromptTooLong, SpeechWatch, reply_budget, speakable_units  # noqa: E402
+
 
 # Keep the real stdout for the protocol; send every stray print to stderr.
 _proto = os.fdopen(os.dup(1), "w", buffering=1)
@@ -67,6 +74,7 @@ def main():
         import mlx.core as mx
         import numpy as np
         from mlx_vlm import load, stream_generate
+        from mlx_vlm.generate import dispatch
         from mlx_vlm.generate.common import generation_stream, wired_limit
         from mlx_vlm.utils import prepare_inputs, should_add_special_tokens
 
@@ -83,7 +91,7 @@ def main():
     tokenizer = processor.tokenizer
     config = model.config
     speech_start_ids = tokenizer.convert_tokens_to_ids(["<|audio_start|>", "<|mixed_start|>"])
-    stop_ids = set(np.atleast_1d(config.eos_token_id).tolist()) | {config.text_end_token_id}
+    tool_call_id = tokenizer.convert_tokens_to_ids("<tool_call>")
     add_special = should_add_special_tokens(config.model_type, processor)
     rate = codec.config.sampling_rate
     samples_per_frame = codec.config.stft_hop_length * codec.config.stft_frame_stack  # 80 ms
@@ -109,6 +117,20 @@ def main():
         low = max(0, start - CONTEXT_FRAMES)
         audio = codec.decode(mx.stack(frames[low:end + 1 if end < len(frames) else end], axis=-1))
         return np.asarray(audio[(start - low) * samples_per_frame:(end - low) * samples_per_frame])
+    # Written replies go through stream_generate, which prepares the inputs itself. Check the
+    # prompt's length there, before the model reads it, and keep the reply inside the context.
+    prepare = dispatch._prepare_generation_inputs
+    budget = {}
+
+    def checked_prepare(*args, **kwargs):
+        prepared = prepare(*args, **kwargs)
+        prompt_tokens = int(np.asarray(prepared[0]).size)
+        budget["max_tokens"] = reply_budget(prompt_tokens, budget.get("max_tokens", 1024), budget.get("least", 0))
+        if len(args) > 6 and isinstance(args[6], dict):  # stream_generate's kwargs
+            args[6]["max_tokens"] = budget["max_tokens"]
+        return prepared
+
+    dispatch._prepare_generation_inputs = checked_prepare
     load_seconds = round(time.time() - started, 1)
     log(f"Model loaded in {load_seconds} s")
     send(event="ready", load_seconds=load_seconds, memory_gb=memory_gb())
@@ -150,6 +172,7 @@ def main():
             # Backstop for text replies: never let the model switch into speech mid-answer.
             options["logit_bias"] = {token: -1e9 for token in speech_start_ids}
             pieces, last, finish = [], None, None
+            budget.update(max_tokens=options["max_tokens"], least=int(job.get("min_reply_tokens") or 0))
             for chunk in stream_generate(model, processor, prompt, **media, **options):
                 if job_id in cancelled:
                     finish = "cancelled"
@@ -165,6 +188,7 @@ def main():
                 "tokens_per_sec": round(last.generation_tps, 1) if last else 0,
                 "prompt_tokens_per_sec": round(last.prompt_tps, 1) if last else 0,
                 "peak_memory_gb": round(mx.get_peak_memory() / 1e9, 2),
+                "context_tokens": CONTEXT_TOKENS,
                 "finish": finish or (last.finish_reason if last else None),
             }
             send(event="done", id=job_id, text="".join(pieces), stats=stats,
@@ -179,7 +203,11 @@ def main():
                                 prompts=prompt, add_special_tokens=add_special)
         input_ids = inputs.pop("input_ids")
         inputs.pop("attention_mask", None)
+        prompt_tokens = int(np.asarray(input_ids).size)
+        options["max_tokens"] = reply_budget(prompt_tokens, options["max_tokens"], int(job.get("min_reply_tokens") or 0))
         tokens, frames, shown, sent, finish = [], [], "", 0, None
+        watch, text_done, first_audio = SpeechWatch(rate, np), False, None
+        deciding = mode is None  # "auto": its first real token is a tool call, speech or writing
         with wired_limit(model, [generation_stream]), mx.stream(generation_stream):
             for token, codes in model.stream_slots(input_ids, generation_mode=mode, **options,
                                                    **{**model.audio_sampling, **inputs}):
@@ -187,7 +215,16 @@ def main():
                     finish = "cancelled"
                     break
                 if codes is None:  # a text slot
+                    # In "auto" the first token decides: a tool call, speech, or a written answer
+                    # (24 of 24 prompts, typed and spoken). The app asks again for speech after a
+                    # written one, so stop it now instead of writing it all out first.
+                    if deciding and tokenizer.decode([token]).strip():
+                        deciding = False
+                        if token not in (tool_call_id, *speech_start_ids):
+                            finish = "wrote"
+                            break
                     tokens.append(token)
+                    text_done = text_done or token == config.text_end_token_id
                     text = tokenizer.decode(tokens, skip_special_tokens=True)
                     if len(text) > len(shown) and text.startswith(shown) and not text.endswith("\ufffd"):
                         send(event="token", id=job_id, text=text[len(shown):])
@@ -196,11 +233,23 @@ def main():
                 if codes[0].item() == config.audio_eos_code:
                     continue
                 frames.append(codes)
+                # Speech is decoded in pieces as it comes, to stream it and to watch it for noise.
                 ready = len(frames) - 1 - sent  # the newest frame waits for the next one
-                if stream and ready >= (FIRST_PIECE if sent == 0 else PIECE):
+                if ready >= (FIRST_PIECE if sent == 0 else PIECE):
                     piece = decode_piece(frames, sent, len(frames) - 1)
-                    send(event="audio_chunk", id=job_id, rate=rate, pcm=base64.b64encode(pcm16(piece)).decode())
+                    if stream:
+                        send(event="audio_chunk", id=job_id, rate=rate, pcm=base64.b64encode(pcm16(piece)).decode())
+                        first_audio = first_audio or round(time.time() - started, 2)
                     sent = len(frames) - 1
+                    noise_from = watch.feed(piece)
+                    if noise_from is not None:
+                        frames, finish = frames[:int(noise_from * rate / samples_per_frame)], "noise"
+                        sent = len(frames)
+                        break
+                # Backstop: speech that runs far past what its text takes to say.
+                if text_done and len(frames) * samples_per_frame / rate > 0.8 * speakable_units(shown) + 5:
+                    finish = "overrun"
+                    break
             if stream and frames and sent < len(frames):
                 piece = decode_piece(frames, sent, len(frames))
                 send(event="audio_chunk", id=job_id, rate=rate, pcm=base64.b64encode(pcm16(piece)).decode())
@@ -217,11 +266,14 @@ def main():
         elapsed = time.time() - started
         stats = {
             "seconds": round(elapsed, 2),
-            "prompt_tokens": int(np.asarray(input_ids).size),
+            "prompt_tokens": prompt_tokens,
+            "context_tokens": CONTEXT_TOKENS,
             "tokens": slots,
+            "tokens_per_sec": round(slots / elapsed, 1) if elapsed else 0,
             "audio_seconds": audio_seconds,
+            "first_audio_seconds": first_audio,
             "peak_memory_gb": round(mx.get_peak_memory() / 1e9, 2),
-            "finish": finish or ("stop" if tokens and tokens[-1] in stop_ids or frames else "length"),
+            "finish": finish or ("length" if slots >= options["max_tokens"] else "stop"),
         }
         send(event="done", id=job_id, text=text.strip(), stats=stats,
              audio=out_path.name if audio_seconds else None, memory_gb=memory_gb())
@@ -229,6 +281,9 @@ def main():
     while (job := jobs.get()) is not None:
         try:
             run(job)
+        except PromptTooLong as exc:
+            send(event="error", id=job.get("id"), code="context", prompt_tokens=exc.prompt_tokens,
+                 context_tokens=CONTEXT_TOKENS, message=str(exc))
         except Exception as exc:
             log(traceback.format_exc())
             send(event="error", id=job.get("id"), message=f"Generation failed: {exc}")

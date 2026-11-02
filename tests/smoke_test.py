@@ -167,7 +167,7 @@ def main():
               ("get_current_time", "local"), ("calculate", "local"), ("add_reminder", "local"), ("list_reminders", "local"),
               ("web_search", "web"), ("open_page", "web"), ("click_link", "web")]
           and "Arabic" in options["tts_languages"] and options["default_system"])
-    for asset in ("/orb.js", "/fonts/newsreader.css", "/grain.png"):
+    for asset in ("/orb.js",):
         conn, resp = request("GET", asset)
         resp.read()
         conn.close()
@@ -182,6 +182,53 @@ def main():
     check("web: addresses on this Mac and the local network are refused",
           all(is_local(h) for h in blocked) and not any(is_local(h) for h in allowed),
           [h for h in blocked if not is_local(h)] + [h for h in allowed if is_local(h)])
+
+    # ---- guards around generation (no model needed)
+    from app.guards import CONTEXT_TOKENS, PromptTooLong, SpeechWatch, reply_budget
+
+    def noise_from(path):
+        """Feed a recording to the speech guard in the worker's piece size; where it calls noise."""
+        raw = subprocess.run([FFMPEG, "-loglevel", "error", "-i", str(path), "-f", "s16le", "-ac", "1", "-ar", "24000", "-"],
+                             capture_output=True).stdout
+        import numpy as np
+        audio, watch = np.frombuffer(raw, "<i2").astype(np.float32) / 32768, SpeechWatch(24000)
+        for i in range(0, len(audio), 11520):
+            if (hit := watch.feed(audio[i:i + 11520])) is not None:
+                return hit
+        return None
+    fixtures = Path(__file__).parent / "fixtures"
+    # A real reply that lost its place: clear speech, then from 18 s on, rumble until the token limit.
+    hit = noise_from(fixtures / "speech_turns_to_noise.opus")
+    check("speech guard: finds where speech turned into noise", hit is not None and 16 <= hit <= 20, hit)
+    hit = noise_from(fixtures / "speech_clean.opus")
+    check("speech guard: leaves clean speech alone", hit is None, hit)
+    try:
+        reply_budget(CONTEXT_TOKENS - 10, 1024)
+        refused = False
+    except PromptTooLong:
+        refused = True
+    check("context guard: a reply gets what's left of the 32K context, and a full prompt is refused",
+          reply_budget(30000, 4096) == CONTEXT_TOKENS - 30000 and reply_budget(500, 1024) == 1024 and refused)
+
+    # ---- which checkpoint start.sh picks (no download)
+    from app import pick_model
+    import contextlib, io
+
+    def picks(memory, installed):
+        pick_model.memory_gb = lambda: memory
+        pick_model.local_copy = lambda repo: repo if repo.rsplit("-", 1)[1] in installed else None
+        fetched = []
+        pick_model.download = lambda repo, size=None: fetched.append(repo.rsplit("-", 1)[1])
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(io.StringIO()):
+            pick_model.main()
+        return out.getvalue().strip().rsplit("-", 1)[1], fetched
+    os.environ.pop("LFM3_MODEL", None)
+    cases = {(8, ()): ("4bit", ["4bit"]), (8, ("8bit",)): ("4bit", ["4bit"]), (16, ()): ("8bit", ["8bit"]),
+             (16, ("4bit",)): ("4bit", []), (24, ("8bit",)): ("8bit", []), (36, ("bf16",)): ("bf16", [])}
+    got = {k: picks(*k) for k in cases}
+    wrong = {k: v for k, v in got.items() if v != cases[k]}
+    check("start.sh: picks 4-bit under 16 GB, else 8-bit, and reuses a download that fits", not wrong, wrong)
 
     # ---- stopped
     _, status = call("GET", "/api/model")
@@ -332,6 +379,15 @@ def main():
     else:
         print("[SKIP] voice: a very loud live-mode recording (tests/fixtures/loud_live_turn.wav isn't here)")
     turn("voice: Voice reply to a typed message", "Say hello in one short sentence.", reply="voice", tools_used=[], spoken=True)
+    # With tools on, a spoken reply starts in "auto", where the model may start writing instead.
+    # It's stopped at its first token and asked to speak, rather than writing the whole answer first.
+    since = call("GET", "/api/logs?since=0")[1]["last"]
+    _, done, events = turn("voice: a reply it starts to write is asked to speak at once", "Hi, how are you?",
+                           reply="voice", tools_used=[], spoken=True)
+    lines = [entry["line"] for entry in call("GET", f"/api/logs?since={since}")[1]["lines"]]
+    first_audio = next((e["_at"] for e in events if e.get("event") == "audio"), 99)
+    check("voice: ...and it speaks within 3 seconds", any("started a written answer" in l for l in lines) and first_audio < 3,
+          f"first audio at {first_audio:.1f}s; " + " / ".join(l for l in lines if "reply" in l)[:300])
     turn("voice: reads a sentence aloud without calling tools",
          "Read this aloud exactly: Everything you hear is generated on this Mac, with no internet connection.",
          reply="voice", must_contain=["generated on this Mac"], tools_used=[], spoken=True)
@@ -391,6 +447,22 @@ def main():
           and time.time() - spoken_job.get("sent", 0) < 30,
           f"{streamed_seconds(events):.1f}s of speech streamed before it stopped")
 
+    # ---- the 32K context
+    filler = "The quick brown fox jumps over the lazy dog near the riverbank while seven tailors stitch a kandura. " * 60
+    long_history = []
+    for i in range(26):  # about 36,000 tokens
+        long_history += [{"role": "user", "text": f"Note {i}: {filler}", "media": []}, {"role": "assistant", "content": f"Noted {i}."}]
+    _, events = chat("How many notes did I send? Answer with a number.", history=long_history, reply="text", tools=False)
+    trimmed, done = [e for e in events if e.get("event") == "trimmed"], final(events)
+    prompt = (done.get("stats") or {}).get("prompt_tokens", 0)
+    check("context: a conversation past 32K leaves out its earliest turns, once, and answers with room to spare",
+          len(trimmed) == 1 and done.get("event") == "done" and prompt + 1024 <= 32768,
+          f"{trimmed}, prompt {prompt}, {done.get('event')}")
+    _, events = chat("Repeat this: " + filler * 25, reply="text", tools=False)
+    done = final(events)
+    check("context: a single message too long for 32K is refused with the reason",
+          done.get("event") == "error" and "32K" in done.get("message", ""), done.get("message"))
+
     # ---- web tools (needs an internet connection)
     web_events = []
     h, done, events = turn("web: searches when Web is on", "Search the web for the year the Golden Gate Bridge opened.",
@@ -425,6 +497,12 @@ def main():
         conn.close()
         ok = ok and resp.status == 200 and data[:3] == b"\xff\xd8\xff"
     check("web: each step saves a screenshot the page can show", ok, f"{len(shots)} screenshots")
+    # Read out, a page of results ran to a minute of speech; a note beside them asks for a summary.
+    _, done, events = turn("web: a spoken answer after a search", "Search the web for good books on machine learning.",
+                           web=True, reply="voice", spoken=True)
+    words = len(done.get("text", "").split())
+    check("web: ...sums up the results instead of reading them out", "web_search" in [e.get("name") for e in events if e.get("event") == "tool_call"]
+          and words <= 80 and (done.get("stats") or {}).get("finish") == "stop", f"{words} words, finish {(done.get('stats') or {}).get('finish')}")
     turn("web: offered only when Web is on", "Search the web for the year the Golden Gate Bridge opened.",
          web=False, tools_used=[])
     turn("web: Tools off turns the web off too", "Search the web for the year the Golden Gate Bridge opened.",

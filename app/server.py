@@ -27,6 +27,7 @@ from fastapi.staticfiles import StaticFiles
 from starlette.datastructures import UploadFile
 
 from app import browser, tools
+from app.guards import CONTEXT_TOKENS
 
 ROOT = Path(__file__).resolve().parent.parent
 DATA = ROOT / "data"
@@ -254,6 +255,10 @@ class ModelProcess:
                 await self.proc.stdin.drain()
                 while True:
                     event = await self.events.get()
+                    if event.get("event") == "done":
+                        self.log(job_summary(job, event.get("stats") or {}))
+                    elif event.get("event") == "error" and event.get("code") != "context":
+                        self.log(f"{job.get('output', 'text')} reply failed: {event.get('message')}")
                     yield event
                     if event.get("event") in ("done", "error"):
                         finished = True
@@ -269,6 +274,25 @@ class ModelProcess:
                 self.proc.stdin.write((json.dumps({"cmd": "cancel", "id": job_id}) + "\n").encode())
             except (BrokenPipeError, ConnectionResetError):
                 pass
+
+
+FINISH_WORDS = {"stop": "finished", "length": "hit the length limit", "cancelled": "stopped",
+                "noise": "speech cut where it turned to noise", "overrun": "speech cut, it ran past the text",
+                "wrote": "started a written answer, so it was asked again to speak"}
+
+
+def job_summary(job, stats):
+    """One log line for a finished job: what it was, its size and its speed."""
+    kind = {"text": "Written", "audio": "Read-aloud", "interleaved": "Spoken", "auto": "Spoken"}.get(job.get("output"), "Reply")
+    parts = [f"{kind} reply: {stats.get('prompt_tokens', 0):,} prompt tokens of {stats.get('context_tokens', 32768) // 1024}K"]
+    parts.append(f"{stats.get('tokens', 0)} generated in {stats.get('seconds', 0)} s ({stats.get('tokens_per_sec', 0)}/s)")
+    if stats.get("audio_seconds"):
+        parts.append(f"{stats['audio_seconds']} s of speech")
+    if stats.get("first_audio_seconds"):
+        parts.append(f"first sound after {stats['first_audio_seconds']} s")
+    parts.append(f"peak {stats.get('peak_memory_gb', 0)} GB")
+    parts.append(FINISH_WORDS.get(stats.get("finish"), str(stats.get("finish"))))
+    return ", ".join(parts)
 
 
 def _signal_group(pid, sig):
@@ -410,6 +434,11 @@ DEFAULT_SYSTEM = (
     "You can see images and video, hear audio and speak. Keep answers concise."
 )
 MAX_TOOL_ROUNDS = 6
+# Read out loud, a page of search results became a minute of speech, and long speech is where
+# the model loses its place. Next to the results, this halved spoken answers (44-57 words in
+# 12 of 12 tries); in the system prompt it worked half the time.
+SPOKEN_NOTE = ("This answer will be spoken aloud. Sum up what you found in two or three short sentences "
+               "and name at most three results. Don't read out titles, lists or links.")
 MAX_MEDIA_IN_CONTEXT = 8
 OLD_TOOL_RESULT_CHARS = 1200
 active = {}        # conversation request id -> worker job id currently running
@@ -550,9 +579,12 @@ async def converse(rid, history, user_msg, speak, use_tools, use_web, system, te
     """Run one user turn: generate, run any tool calls, generate again, until an answer.
 
     Events: started, token (text as it's written), audio (base64 16-bit PCM as it's spoken),
-    tool_call, tool_result, done, then transcript for each voice message, or error.
+    tool_call, tool_result, trimmed (earlier turns left out to fit the context), done, then
+    transcript for each voice message, or error.
     """
     messages, media = build_messages(history + [user_msg])
+    steps = []  # this turn's tool calls and results, as the model sees them
+    left_out = 0
     # No extra "use the tools" instruction: the schemas are enough, and with one the model
     # called the clock before spoken replies that had nothing to do with time.
     system = (system or DEFAULT_SYSTEM).rstrip()
@@ -567,15 +599,17 @@ async def converse(rid, history, user_msg, speak, use_tools, use_web, system, te
     round_no, asked_to_speak = 0, False
     try:
         while True:
-            job = {"id": uuid.uuid4().hex[:12], "messages": [{"role": "system", "content": system}] + messages,
+            job = {"id": uuid.uuid4().hex[:12], "messages": [{"role": "system", "content": system}] + messages + steps,
                    "tools": schemas, "output": output, "stream": speak,
-                   "temperature": temperature, "max_tokens": max_tokens, **media}
+                   "temperature": temperature, "max_tokens": max_tokens, **media,
+                   # With earlier turns to leave out, make room for a whole reply, not a scrap of one.
+                   "min_reply_tokens": max_tokens if history else 0}
             active[rid] = job["id"]
             hide = ToolMarkupFilter()
             # In "auto" the model may write an answer instead of speaking it, and then it's asked
             # again; its words wait here until speech starts, so the page never shows a draft.
             held, speaking = [], output != "auto"
-            text, audio, stats, failure = "", None, None, None
+            text, audio, stats, failure, too_long = "", None, None, None, None
             async for event in model.run(job):
                 kind = event.get("event")
                 if kind == "token":
@@ -595,6 +629,27 @@ async def converse(rid, history, user_msg, speak, use_tools, use_web, system, te
                     text, audio, stats = event.get("text", ""), event.get("audio"), event.get("stats")
                 elif kind == "error":
                     failure = event.get("message")
+                    too_long = event.get("code") == "context" and event.get("prompt_tokens")
+            if failure and too_long and history and rid not in cancelled:
+                # Leave out the earliest turns (each a user message and the replies after it) and
+                # retry. Leave out enough at once, judged by their share of the text, since every
+                # try prepares the whole prompt again, images and video included.
+                over = (too_long + max_tokens - CONTEXT_TOKENS) / too_long
+                sizes = [len(json.dumps(m, ensure_ascii=False)) + 6000 * len(m.get("media") or []) for m in history]
+                cut, dropped = 0, 0
+                while cut < len(history) and (cut == 0 or dropped < over * 1.15 * sum(sizes)):
+                    cut = next((i for i in range(cut + 1, len(history)) if history[i].get("role") == "user"), len(history))
+                    dropped = sum(sizes[:cut])
+                history, left_out = history[cut:], left_out + cut
+                messages, media = build_messages(history + [user_msg])
+                model.log(f"The prompt was {too_long:,} tokens, more than the {event.get('context_tokens', 32768) // 1024}K context; "
+                          f"left out the {left_out} earliest messages and tried again.")
+                yield {"event": "trimmed", "left_out": left_out, "prompt_tokens": too_long}
+                continue
+            if failure and too_long:
+                yield {"event": "error", "message": f"This message is too long for the model: {too_long:,} tokens, and it "
+                       "holds 32K for the prompt and the reply together. Use a shorter video or fewer images."}
+                return
             if failure:
                 yield {"event": "error", "message": failure}
                 return
@@ -612,7 +667,8 @@ async def converse(rid, history, user_msg, speak, use_tools, use_web, system, te
                 if calls and not answer:
                     answer = "I stopped after several tool calls without reaching an answer."
                 appended.append({"role": "assistant", "content": answer})
-                stats = {**(stats or {}), "seconds": round(time.time() - started, 2), "tool_rounds": round_no}
+                stats = {**(stats or {}), "generate_seconds": (stats or {}).get("seconds"),
+                         "seconds": round(time.time() - started, 2), "tool_rounds": round_no}
                 if rid in cancelled:
                     stats["finish"] = "cancelled"
                 yield {"event": "done", "text": answer, "audio": audio, "stats": stats, "append": appended}
@@ -630,7 +686,10 @@ async def converse(rid, history, user_msg, speak, use_tools, use_web, system, te
                        **({"screenshot": f"/outputs/{shot}"} if shot else {})}
             call_msg = {"role": "assistant", "tool_calls": calls, **({"content": preface} if preface else {})}
             tool_msg = {"role": "tool", "content": json.dumps(results, ensure_ascii=False)}
-            messages += [call_msg, tool_msg]
+            seen = tool_msg
+            if speak and any(c["function"]["name"] in tools.WEB_TOOLS for c in calls):
+                seen = {"role": "tool", "content": json.dumps({"results": results, "note": SPOKEN_NOTE}, ensure_ascii=False)}
+            steps += [call_msg, seen]
             appended += [call_msg, tool_msg]
             if speak:
                 # A spoken reply answers right after one tool step: left to choose, the model

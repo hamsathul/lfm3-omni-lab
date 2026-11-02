@@ -31,6 +31,7 @@
     </section>
     <div class="top-actions">
       <button type="button" class="btn small" id="new-chat">New chat</button>
+      <button type="button" class="btn small" id="open-log" aria-expanded="false" aria-controls="side">Log</button>
       <button type="button" class="btn small" id="open-settings" aria-expanded="false" aria-controls="settings">Settings</button>
     </div>
   </header>
@@ -142,8 +143,8 @@
         </div>
         <p class="hint">Temperature 0 always picks the most likely word, which the model card recommends for text.</p>
         <div class="log-row">
-          <button type="button" class="btn small" id="log-toggle" aria-expanded="false" aria-controls="log-drawer">Show the model log</button>
-          <p class="hint">What the model process prints: loading, each request and any errors.</p>
+          <button type="button" class="btn small" id="log-toggle" aria-expanded="false" aria-controls="side">Show the model log</button>
+          <p class="hint">Loading, each reply's size and speed, and any errors. It opens beside the conversation; the Log button at the top does the same.</p>
         </div>
       </section>
       <section>
@@ -182,12 +183,20 @@
     </div>
   </aside>
 
-  <aside class="log-drawer" id="log-drawer" hidden aria-label="Model log">
-    <div class="log-head">
-      <h2>Model log</h2>
-      <button type="button" class="btn quiet small" id="log-close">Close</button>
+  <aside class="side" id="side" hidden aria-label="Side panel">
+    <div class="side-head">
+      <div class="side-tabs" role="tablist" aria-label="Show">
+        <button type="button" role="tab" id="tab-talk" data-tab="talk" aria-selected="false" aria-controls="side-talk" tabindex="-1">Conversation</button>
+        <button type="button" role="tab" id="tab-log" data-tab="log" aria-selected="true" aria-controls="side-log">Log</button>
+      </div>
+      <button type="button" class="btn quiet small" id="side-close">Close</button>
     </div>
-    <pre class="log-body" id="log-body" tabindex="0"></pre>
+    <div class="side-pane" id="side-talk" role="tabpanel" aria-labelledby="tab-talk" hidden>
+      <ol class="live-log" id="live-log" aria-live="polite"></ol>
+    </div>
+    <div class="side-pane" id="side-log" role="tabpanel" aria-labelledby="tab-log">
+      <pre class="log-body" id="log-body" tabindex="0"></pre>
+    </div>
   </aside>
 
   <section class="live" id="live" hidden aria-label="Live conversation" role="dialog" aria-modal="true" data-phase="idle">
@@ -195,10 +204,17 @@
     <header class="live-top">
       <h2>Live conversation</h2>
       <div class="live-top-actions">
-        <button type="button" class="btn small" id="live-transcript" aria-expanded="false" aria-controls="live-sheet">Transcript</button>
+        <button type="button" class="btn small" id="live-talk" aria-expanded="false" aria-controls="side">Conversation</button>
+        <button type="button" class="btn small" id="live-logs" aria-expanded="false" aria-controls="side">Log</button>
+        <button type="button" class="btn small" id="live-stats" aria-pressed="true" aria-controls="live-perf">Performance</button>
         <button type="button" class="btn small" id="live-end">End <kbd>Esc</kbd></button>
       </div>
     </header>
+    <section class="live-perf" id="live-perf" aria-labelledby="perf-title">
+      <h3 id="perf-title">Last reply</h3>
+      <p class="perf-empty" id="perf-empty">Timings and model numbers for each reply show here.</p>
+      <dl class="perf-list" id="perf-list" hidden></dl>
+    </section>
     <div class="live-main">
       <p class="live-you" id="live-you" dir="auto"></p>
       <p class="live-step off" id="live-step"><span class="tool-icon" aria-hidden="true"></span><b></b><span class="live-step-line"></span></p>
@@ -225,13 +241,6 @@
         <label class="switch" title="It hears itself through speakers, so use headphones"><input type="checkbox" id="live-barge"> Let me talk over it (headphones)</label>
       </div>
     </div>
-    <aside class="live-sheet" id="live-sheet" hidden aria-label="Transcript">
-      <div class="live-sheet-head">
-        <h3>Transcript</h3>
-        <button type="button" class="btn quiet small" id="live-sheet-close">Close</button>
-      </div>
-      <ol class="live-log" id="live-log" aria-live="polite"></ol>
-    </aside>
   </section>
 
   <script src="/app.js" type="module"></script>
