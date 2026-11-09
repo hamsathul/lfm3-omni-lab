@@ -229,7 +229,11 @@ pub const STARTERS: [Starter; 6] = [
     Starter { label: "Transcribe a clip", text: "Transcribe this recording word for word.", sample: Some("/samples/speech.wav"), reply: Some(Reply::Text), web: false },
     Starter { label: "Describe a video", text: "Describe what happens in this clip and what you can hear.", sample: Some("/samples/clip.mp4"), reply: None, web: false },
     Starter { label: "Latest Python", text: "Look up the latest Python release.", sample: None, reply: Some(Reply::Text), web: true },
-    Starter { label: "Read aloud", text: "Read this aloud exactly: Everything you hear is generated on this Mac, with no internet connection.", sample: None, reply: Some(Reply::Voice), web: false },
+    Starter { label: "Read aloud", text: if cfg!(target_os = "macos") {
+        "Read this aloud exactly: Everything you hear is generated on this Mac, with no internet connection."
+    } else {
+        "Read this aloud exactly: Everything you hear is generated on this PC, with no internet connection."
+    }, sample: None, reply: Some(Reply::Voice), web: false },
 ];
 
 pub enum Server {

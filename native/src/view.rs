@@ -151,7 +151,7 @@ fn top_bar(s: &State, p: &Pal, inset: f32, compact: bool) -> El {
             }))
             .child(
                 el().key("new-chat").size(30.0, 30.0).center().radius(8.0).hover(p.control_hover).cursor(Cursor::Pointer)
-                    .help("New chat (⌘N)")
+                    .help(if cfg!(target_os = "macos") { "New chat (⌘N)" } else { "New chat (Ctrl+N)" })
                     .child(glyph(Glyph::Compose, 18.0, p.text2))
                     .on_press(|s: &mut State| s.new_chat()),
             );
@@ -291,7 +291,7 @@ fn empty_state(s: &State, p: &Pal) -> El {
     let (headline, sub) = match s.status().map(|st| st.state.as_str()) {
         Some("ready") => ("What can I help with?", "Type, drop in a photo, audio or video, record a voice message, or tap the orb to talk."),
         Some("starting") => ("Loading the model…", "LFM3-Omni-2B is loading into memory. This takes a few seconds."),
-        _ => ("The model is stopped", "Start it to chat. It runs on this Mac with MLX; nothing leaves the machine."),
+        _ => ("The model is stopped", runs_here(s)),
     };
     let mood = match s.status().map(|st| st.state.as_str()) {
         Some("ready") => Mood::Listening,
@@ -653,4 +653,14 @@ fn recording_bar(pill: El, s: &State, rec: &crate::model::Recording, p: &Pal) ->
         )
         .child(bars)
         .child(round_button("rec-send", Glyph::Up, p.mine, Color::WHITE, p).help("Send voice message").on_press_tx(|s: &mut State, tx: &mut Tx| s.finish_recording(tx)))
+}
+
+/// Where the model runs, for the stopped screen.
+fn runs_here(s: &State) -> &'static str {
+    let llama = matches!(&s.server, Server::Up(status) if status.backend != "mlx");
+    match (cfg!(target_os = "macos"), llama) {
+        (true, false) => "Start it to chat. It runs on this Mac with MLX; nothing leaves the machine.",
+        (true, true) => "Start it to chat. It runs on this Mac with llama.cpp; nothing leaves the machine.",
+        (false, _) => "Start it to chat. It runs on this PC with llama.cpp; nothing leaves the machine.",
+    }
 }

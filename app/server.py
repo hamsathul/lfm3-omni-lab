@@ -1,8 +1,10 @@
 """LFM3-Omni Lab: one multimodal conversation with a local LFM3-Omni model.
 
-The model runs in app/worker.py as a child process. Start, Stop and Restart
-spawn and kill that process; jobs go to it over stdin and results stream back.
-This file serves the page, converts attachments, and runs the tool-calling loop.
+The model runs in a worker child process: app/worker.py with MLX on a Mac, or
+app/worker_llamacpp.py with llama.cpp elsewhere (LFM3_BACKEND picks one by hand).
+Start, Stop and Restart spawn and kill that process; jobs go to it over stdin and
+results stream back. This file serves the page, converts attachments, and runs the
+tool-calling loop.
 """
 
 import asyncio
@@ -33,7 +35,13 @@ ROOT = Path(__file__).resolve().parent.parent
 DATA = ROOT / "data"
 MEDIA = DATA / "media"
 OUTPUTS = DATA / "outputs"
-MODEL_ID = os.environ.get("LFM3_MODEL", "LiquidAI/LFM3-Omni-2B-MLX-8bit")
+WINDOWS = os.name == "nt"
+# MLX needs Apple Silicon; everywhere else the model runs in llama.cpp.
+BACKEND = os.environ.get("LFM3_BACKEND") or ("mlx" if sys.platform == "darwin" else "llamacpp")
+WORKER = ROOT / "app" / ("worker.py" if BACKEND == "mlx" else "worker_llamacpp.py")
+MODEL_ID = os.environ.get("LFM3_MODEL") or ("LiquidAI/LFM3-Omni-2B-MLX-8bit" if BACKEND == "mlx" else "LiquidAI/LFM3-Omni-2B-GGUF:Q8_0")
+COMPUTER = "Mac" if sys.platform == "darwin" else "PC"
+INSTALL_FFMPEG = "winget install Gyan.FFmpeg" if WINDOWS else ("brew install ffmpeg" if sys.platform == "darwin" else "sudo apt install ffmpeg")
 VIDEO_MAX_SECONDS = 30
 VIDEO_MAX_SIDE = 640
 
@@ -52,7 +60,11 @@ def find_tool(name):
     found = shutil.which(name)
     if found:
         return found
-    for folder in ("/opt/homebrew/bin", "/usr/local/bin"):
+    folders = ["/opt/homebrew/bin", "/usr/local/bin"]
+    if WINDOWS:  # winget's links, for a server started before ffmpeg was installed
+        folders = [str(Path(os.environ.get("LOCALAPPDATA", "")) / "Microsoft" / "WinGet" / "Links")]
+        name += ".exe"
+    for folder in folders:
         candidate = Path(folder) / name
         if candidate.exists():
             return str(candidate)
@@ -110,6 +122,7 @@ class ModelProcess:
             "state": self.state,
             "busy": self.busy,
             "model": MODEL_ID,
+            "backend": BACKEND,
             "pid": pid,
             "uptime_seconds": round(time.time() - self.ready_at) if self.state == "ready" and self.ready_at else None,
             "starting_seconds": round(time.time() - self.started_at) if self.state == "starting" and self.started_at else None,
@@ -141,18 +154,21 @@ class ModelProcess:
         self.state, self.error = "starting", None
         self.started_at, self.ready_at = time.time(), None
         self.load_seconds = self.memory_gb = None
-        env = {**os.environ, "PYTHONUNBUFFERED": "1", "TOKENIZERS_PARALLELISM": "false",
+        env = {**os.environ, "PYTHONUNBUFFERED": "1", "TOKENIZERS_PARALLELISM": "false", "PYTHONIOENCODING": "utf-8",
                # Killing the process makes Python warn about a leaked semaphore; it's harmless noise.
                "PYTHONWARNINGS": "ignore:resource_tracker:UserWarning"}
+        # Its own process group, so Stop ends everything it started (llama-server, say).
+        group = ({"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.CREATE_NO_WINDOW} if WINDOWS
+                 else {"start_new_session": True})
         self.proc = await asyncio.create_subprocess_exec(
-            sys.executable, "-u", str(ROOT / "app" / "worker.py"),
+            sys.executable, "-u", str(WORKER),
             "--model", MODEL_ID, "--outputs", str(OUTPUTS),
             stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
-            start_new_session=True,  # its own process group, so Stop kills everything it spawned
             limit=64 * 1024 * 1024,
             env=env,
+            **group,
         )
         self.log(f"Started the model process (pid {self.proc.pid}) for {MODEL_ID}")
         self.supervisor = asyncio.create_task(self._supervise(self.proc))
@@ -164,12 +180,12 @@ class ModelProcess:
             return
         self.state = "stopping"
         self.log(f"Stopping the model process (pid {proc.pid})")
-        _signal_group(proc.pid, signal.SIGTERM)
+        _end_group(proc, force=False)
         try:
             await asyncio.wait_for(proc.wait(), timeout=10)
         except asyncio.TimeoutError:
             self.log("The model didn't stop within 10 s; forcing it")
-            _signal_group(proc.pid, signal.SIGKILL)
+            _end_group(proc, force=True)
             await proc.wait()
         if self.supervisor:
             try:
@@ -192,6 +208,9 @@ class ModelProcess:
                 "event": "error", "id": self.current_job,
                 "message": "The model was stopped before it finished this request.",
             })
+        if not WINDOWS:
+            # Anything it started that outlived it (llama-server, if it was killed outright) goes too.
+            _end_group(proc, force=True)
         if self.state == "stopping":
             self.state = "stopped"
             self.log("Model stopped. Its memory has been released.")
@@ -295,14 +314,29 @@ def job_summary(job, stats):
     return ", ".join(parts)
 
 
-def _signal_group(pid, sig):
+def _end_group(proc, force):
+    """End the worker and everything it started. On a Mac and Linux, SIGTERM to its process
+    group, then SIGKILL. On Windows, closing its stdin asks it to stop (it ends llama-server
+    on the way out), then taskkill ends the whole tree."""
+    if WINDOWS:
+        if not force:
+            try:
+                proc.stdin.close()
+            except (OSError, RuntimeError):
+                pass
+            return
+        subprocess.run(["taskkill", "/PID", str(proc.pid), "/T", "/F"], capture_output=True,
+                       creationflags=subprocess.CREATE_NO_WINDOW)
+        return
     try:
-        os.killpg(pid, sig)
+        os.killpg(proc.pid, signal.SIGKILL if force else signal.SIGTERM)
     except (ProcessLookupError, PermissionError):
         pass
 
 
 def process_memory_gb(pid):
+    if WINDOWS:
+        return _windows_memory_gb(pid)
     try:
         out = subprocess.run(["ps", "-o", "rss=", "-p", str(pid)], capture_output=True, text=True, timeout=2).stdout
         return round(int(out.strip()) * 1024 / 1e9, 2)
@@ -310,10 +344,35 @@ def process_memory_gb(pid):
         return None
 
 
+def _windows_memory_gb(pid):
+    """The process's working set, from the Windows API (this runs on every status poll)."""
+    import ctypes
+    from ctypes import wintypes
+
+    class Counters(ctypes.Structure):
+        _fields_ = [("cb", wintypes.DWORD), ("PageFaultCount", wintypes.DWORD)] + [
+            (name, ctypes.c_size_t) for name in ("PeakWorkingSetSize", "WorkingSetSize", "QuotaPeakPagedPoolUsage",
+                                                 "QuotaPagedPoolUsage", "QuotaPeakNonPagedPoolUsage",
+                                                 "QuotaNonPagedPoolUsage", "PagefileUsage", "PeakPagefileUsage")]
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.OpenProcess.restype = wintypes.HANDLE
+    handle = kernel32.OpenProcess(0x1000, False, pid)  # PROCESS_QUERY_LIMITED_INFORMATION
+    if not handle:
+        return None
+    try:
+        counters = Counters(cb=ctypes.sizeof(Counters))
+        if not kernel32.K32GetProcessMemoryInfo(wintypes.HANDLE(handle), ctypes.byref(counters), counters.cb):
+            return None
+        return round(counters.WorkingSetSize / 1e9, 2)
+    finally:
+        kernel32.CloseHandle(wintypes.HANDLE(handle))
+
+
 # ---- media preparation ---------------------------------------------------
 def ffmpeg(*args):
     if not FFMPEG:
-        raise MediaError("ffmpeg isn't installed. Install it with: brew install ffmpeg")
+        raise MediaError(f"ffmpeg isn't installed. Install it with: {INSTALL_FFMPEG}")
     result = subprocess.run([FFMPEG, "-hide_banner", "-loglevel", "error", "-y", *args],
                             capture_output=True, text=True)
     if result.returncode != 0:
@@ -328,13 +387,14 @@ def to_wav(src, dest, max_seconds=None):
     return str(dest)
 
 
-def soften(path, ceiling=0.8, target=0.7):
+def soften(path, ceiling=0.8, target=0.5):
     """Turn down audio that peaks near full scale.
 
     A live-mode recording boosted by the browser's automatic gain (RMS 0.23, peaks at full
     scale) was "transcribed" as an answer: "What time is it in Tokyo right now?" came back as
-    "I don't know the current time in Tokyo." The same recording at 70% volume or lower came
-    back word for word, so loud audio is scaled to peak at 70%. Quiet audio is left alone.
+    "I don't know the current time in Tokyo." With MLX the same recording at 70% volume or
+    lower came back word for word; with llama.cpp, 50% or lower (70% still failed). So loud
+    audio is scaled to peak at 50%. Quiet audio is left alone.
     """
     with wave.open(str(path), "rb") as w:
         params = w.getparams()
@@ -364,9 +424,17 @@ def has_audio_stream(src):
 def prepare_image(src, workdir):
     if src.suffix.lower() in (".heic", ".heif"):
         dest = workdir / "image.jpg"
-        result = subprocess.run(["sips", "-s", "format", "jpeg", str(src), "--out", str(dest)],
-                                capture_output=True, text=True)
-        if result.returncode != 0:
+        if sys.platform == "darwin":
+            result = subprocess.run(["sips", "-s", "format", "jpeg", str(src), "--out", str(dest)],
+                                    capture_output=True, text=True)
+            ok = result.returncode == 0
+        else:
+            try:
+                ffmpeg("-i", str(src), "-frames:v", "1", str(dest))
+                ok = dest.exists()
+            except MediaError:
+                ok = False
+        if not ok:
             raise MediaError("Couldn't convert that HEIC photo. Try a JPEG or PNG.")
         return str(dest)
     return str(src)
@@ -430,7 +498,7 @@ def prepare_media(src, kind, folder):
 
 # ---- conversation ----------------------------------------------------------
 DEFAULT_SYSTEM = (
-    "You are LFM3-Omni, a helpful assistant running entirely on the user's Mac. "
+    f"You are LFM3-Omni, a helpful assistant running entirely on the user's {COMPUTER}. "
     "You can see images and video, hear audio and speak. Keep answers concise."
 )
 MAX_TOOL_ROUNDS = 6
@@ -778,7 +846,7 @@ def clean_data_folders():
 async def lifespan(_app):
     clean_data_folders()
     if not FFMPEG:
-        model.log("ffmpeg wasn't found: audio, recording and video won't work. Install it with: brew install ffmpeg")
+        model.log(f"ffmpeg wasn't found: audio, recording and video won't work. Install it with: {INSTALL_FFMPEG}")
     if os.environ.get("LFM3_AUTOSTART") == "1":
         await model.start()
     yield
@@ -815,7 +883,8 @@ async def get_logs(since: int = 0):
 
 @app.get("/api/options")
 async def get_options():
-    return {"tts_languages": TTS_LANGUAGES, "voices": VOICES, "tools": tools.DESCRIPTIONS,
+    return {"tts_languages": TTS_LANGUAGES, "voices": VOICES, "tools": tools.DESCRIPTIONS, "computer": COMPUTER,
+            "backend": BACKEND,
             "default_system": DEFAULT_SYSTEM, "video_max_seconds": VIDEO_MAX_SECONDS,
             "video_max_side": VIDEO_MAX_SIDE, "max_media_in_context": MAX_MEDIA_IN_CONTEXT}
 

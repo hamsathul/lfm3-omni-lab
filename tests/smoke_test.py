@@ -1,7 +1,9 @@
 """End-to-end check of LFM3-Omni Lab against a running server.
 
-Start the app first (./start.sh), then:  .venv/bin/python tests/smoke_test.py
-It starts, uses, restarts and stops the model through the same API the page uses.
+Start the app first (./start.sh, or start.ps1 on Windows), then:
+  .venv/bin/python tests/smoke_test.py      (on Windows: .venv/Scripts/python tests/smoke_test.py)
+It starts, uses, restarts and stops the model through the same API the page uses. Spoken
+questions are made with the system's text to speech (say on a Mac, SAPI on Windows).
 """
 
 import base64
@@ -20,7 +22,9 @@ from pathlib import Path
 HOST, PORT = "127.0.0.1", int(os.environ.get("PORT", 8765))
 ROOT = Path(__file__).resolve().parent.parent
 SAMPLES = ROOT / "static" / "samples"
-FFMPEG = shutil.which("ffmpeg") or "/opt/homebrew/bin/ffmpeg"
+WINDOWS = os.name == "nt"
+FFMPEG = shutil.which("ffmpeg") or (str(Path(os.environ.get("LOCALAPPDATA", "")) / "Microsoft" / "WinGet" / "Links" / "ffmpeg.exe")
+                                    if WINDOWS else "/opt/homebrew/bin/ffmpeg")
 results = []
 
 
@@ -107,11 +111,48 @@ def wait_for(state, timeout=180):
 
 
 def pid_alive(pid):
+    if WINDOWS:  # os.kill(pid, 0) would end the process there
+        out = subprocess.run(["tasklist", "/FI", f"PID eq {pid}", "/FO", "CSV", "/NH"], capture_output=True, text=True).stdout
+        return f'"{pid}"' in out
     try:
         os.kill(pid, 0)
         return True
     except ProcessLookupError:
         return False
+
+
+def kill_hard(pid):
+    """End a process at once, as a crash would."""
+    if WINDOWS:
+        subprocess.run(["taskkill", "/PID", str(pid), "/F"], capture_output=True)
+    else:
+        os.kill(pid, signal.SIGKILL)
+
+
+def llama_servers():
+    """How many llama-server processes are running."""
+    if WINDOWS:
+        out = subprocess.run(["tasklist", "/FI", "IMAGENAME eq llama-server.exe", "/FO", "CSV", "/NH"],
+                             capture_output=True, text=True).stdout
+        return out.lower().count("llama-server.exe")
+    return len(subprocess.run(["pgrep", "-x", "llama-server"], capture_output=True, text=True).stdout.split())
+
+
+def say_to_file(line, path, voice=None):
+    """A spoken question made with the system's text to speech, or None where there's none."""
+    if sys.platform == "darwin":
+        out = path.with_suffix(".aiff")  # AIFF also tests another audio format
+        subprocess.run(["say", *(["-v", voice] if voice else []), "-o", str(out), line], capture_output=True)
+    elif WINDOWS:
+        out = path.with_suffix(".wav")
+        choose = {"Fred": "Microsoft David Desktop"}.get(voice)
+        script = ("Add-Type -AssemblyName System.Speech; $s = New-Object System.Speech.Synthesis.SpeechSynthesizer; "
+                  + (f"try {{ $s.SelectVoice('{choose}') }} catch {{}}; " if choose else "")
+                  + f"$s.SetOutputToWaveFile('{out}'); $s.Speak('{line.replace(chr(39), chr(39) * 2)}'); $s.Dispose()")
+        subprocess.run(["powershell", "-NoProfile", "-Command", script], capture_output=True)
+    else:
+        return None
+    return out if out.exists() else None
 
 
 def turn(name, text, media=(), history=(), must_contain=(), tools_used=None, spoken=False, **options):
@@ -213,6 +254,7 @@ def main():
     # ---- which checkpoint start.sh picks (no download)
     from app import pick_model
     import contextlib, io
+    backend = call("GET", "/api/model")[1].get("backend", "mlx")
 
     def picks(memory, installed):
         pick_model.memory_gb = lambda: memory
@@ -226,9 +268,37 @@ def main():
     os.environ.pop("LFM3_MODEL", None)
     cases = {(8, ()): ("4bit", ["4bit"]), (8, ("8bit",)): ("4bit", ["4bit"]), (16, ()): ("8bit", ["8bit"]),
              (16, ("4bit",)): ("4bit", []), (24, ("8bit",)): ("8bit", []), (36, ("bf16",)): ("bf16", [])}
-    got = {k: picks(*k) for k in cases}
-    wrong = {k: v for k, v in got.items() if v != cases[k]}
-    check("start.sh: picks 4-bit under 16 GB, else 8-bit, and reuses a download that fits", not wrong, wrong)
+    if backend == "mlx":
+        got = {k: picks(*k) for k in cases}
+        wrong = {k: v for k, v in got.items() if v != cases[k]}
+        check("start.sh: picks 4-bit under 16 GB, else 8-bit, and reuses a download that fits", not wrong, wrong)
+    else:
+        import huggingface_hub
+
+        def gguf_picks(vram, cached):
+            fetched = []
+
+            def fake(repo, filename, local_files_only=False):
+                if local_files_only and filename not in cached:
+                    raise FileNotFoundError(filename)
+                if not local_files_only:
+                    fetched.append(filename)
+                return filename
+            saved, huggingface_hub.hf_hub_download = huggingface_hub.hf_hub_download, fake
+            pick_model.gpu_memory_mb = lambda: vram
+            out = io.StringIO()
+            try:
+                with contextlib.redirect_stdout(out), contextlib.redirect_stderr(io.StringIO()):
+                    pick_model.gguf_main()
+            finally:
+                huggingface_hub.hf_hub_download = saved
+            return out.getvalue().strip().rsplit(":", 1)[1], len(fetched)
+        q8 = pick_model.gguf_files(pick_model.GGUF_REPO, "Q8_0")
+        cases = {(8151, ()): ("Q8_0", 2), (3072, ()): ("Q4_K_M", 2), (None, tuple(q8)): ("Q8_0", 0), (8151, (q8[0],)): ("Q8_0", 1)}
+        got = {k: gguf_picks(*k) for k in cases}
+        wrong = {k: v for k, v in got.items() if v != cases[k]}
+        check("start script: picks the Q8_0 GGUF, Q4_K_M under 4 GB of GPU memory, and downloads only what's missing",
+              not wrong, wrong)
 
     # ---- stopped
     _, status = call("GET", "/api/model")
@@ -244,10 +314,13 @@ def main():
     # ---- attachments (prepared without the model)
     code, sign = upload(SAMPLES / "sign.png")
     check("upload: PNG image (works while the model is stopped)", code == 200 and sign["kind"] == "image", sign)
-    heic = tmp / "photo.heic"
-    subprocess.run(["sips", "-s", "format", "heic", str(SAMPLES / "sign.png"), "--out", str(heic)], capture_output=True)
-    code, heic_item = upload(heic) if heic.exists() else (0, {})
-    check("upload: iPhone HEIC photo", code == 200 and heic_item.get("kind") == "image", heic_item)
+    if sys.platform == "darwin":  # sips makes the HEIC
+        heic = tmp / "photo.heic"
+        subprocess.run(["sips", "-s", "format", "heic", str(SAMPLES / "sign.png"), "--out", str(heic)], capture_output=True)
+        code, heic_item = upload(heic) if heic.exists() else (0, {})
+        check("upload: iPhone HEIC photo", code == 200 and heic_item.get("kind") == "image", heic_item)
+    else:
+        print("[SKIP] upload: iPhone HEIC photo (no HEIC encoder here to make one)")
     code, speech = upload(SAMPLES / "speech.wav")
     check("upload: WAV recording", code == 200 and speech["kind"] == "audio" and speech["seconds"] > 3, speech)
     webm = tmp / "recording.webm"
@@ -273,14 +346,13 @@ def main():
     code, data = upload(notes)
     check("upload: unsupported file type is refused", code == 400 and "image" in data.get("error", ""), data.get("error"))
 
-    # Spoken questions, made with macOS text to speech (AIFF also tests another audio format)
+    # Spoken questions, made with the system's text to speech
     spoken = {}
     for key, line, voice in [("moon", "Tell me one fun fact about the moon.", None), ("time", "What time is it in Tokyo right now?", None),
                              # Fred's voice is one the model followed less than its own earlier answers
                              ("story", "Tell me a story.", "Fred")]:
-        aiff = tmp / f"{key}.aiff"
-        subprocess.run(["say", *(["-v", voice] if voice else []), "-o", str(aiff), line], capture_output=True)
-        code, item = upload(aiff, voice=True)
+        recording = say_to_file(line, tmp / key, voice)
+        code, item = upload(recording, voice=True) if recording else (0, None)
         spoken[key] = item if code == 200 else None
     check("upload: spoken questions as voice messages", all(v and v["voice"] for v in spoken.values()), spoken)
     # a second picture, nothing like the sign
@@ -299,7 +371,7 @@ def main():
     status = wait_for("ready")
     check("Start loads the model", status["state"] == "ready" and status["pid"],
           f"state seen while loading: {mid['state']}; ready in {time.time() - t:.1f}s; load {status['load_seconds']}s; "
-          f"MLX memory {status['memory_gb']} GB")
+          f"model memory {status['memory_gb']} GB ({status.get('backend', 'mlx')})")
     first_pid = status["pid"]
 
     # ---- conversation
@@ -415,7 +487,10 @@ def main():
                            reply="voice", tools_used=[], spoken=True)
     lines = [entry["line"] for entry in call("GET", f"/api/logs?since={since}")[1]["lines"]]
     first_audio = next((e["_at"] for e in events if e.get("event") == "audio"), 99)
-    check("voice: ...and it speaks within 3 seconds", any("started a written answer" in l for l in lines) and first_audio < 3,
+    # MLX: the reply it starts to write is stopped and asked for again as speech. llama.cpp
+    # always writes and then speaks, so there's nothing to ask again.
+    asked_again = backend != "mlx" or any("started a written answer" in l for l in lines)
+    check("voice: ...and it speaks within 3 seconds", asked_again and first_audio < 3,
           f"first audio at {first_audio:.1f}s; " + " / ".join(l for l in lines if "reply" in l)[:300])
     turn("voice: reads a sentence aloud without calling tools",
          "Read this aloud exactly: Everything you hear is generated on this Mac, with no internet connection.",
@@ -477,9 +552,8 @@ def main():
           f"{streamed_seconds(events):.1f}s of speech streamed before it stopped")
 
     # Stopped before the answer starts, while the voice message is still being written down
-    aiff = tmp / "stop_early.aiff"
-    subprocess.run(["say", "-o", str(aiff), "Tell me a long story about a lighthouse keeper."], capture_output=True)
-    _, early = upload(aiff, voice=True)
+    recording = say_to_file("Tell me a long story about a lighthouse keeper.", tmp / "stop_early")
+    _, early = upload(recording, voice=True)
     _, events = chat("", media=[early["id"]], reply="voice", max_tokens=2000,
                      on_event=lambda e: e.get("event") == "started" and call("POST", f"/api/cancel/{e['id']}"))
     done = final(events)
@@ -585,9 +659,14 @@ def main():
     # ---- crash recovery
     call("POST", "/api/model/start")
     status = wait_for("ready")
-    os.kill(status["pid"], signal.SIGKILL)
+    servers = llama_servers()
+    kill_hard(status["pid"])
     status = wait_for("error", 15)
     check("a crashed model is reported", status["state"] == "error", status.get("error"))
+    if backend != "mlx":
+        time.sleep(1)
+        left = llama_servers()
+        check("a crashed worker leaves no llama-server behind", left == servers - 1, f"{servers} before, {left} after")
     call("POST", "/api/model/start")
     status = wait_for("ready")
     check("the model starts again after a crash", status["state"] == "ready")

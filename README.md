@@ -1,14 +1,14 @@
 # LFM3-Omni Lab
 
-One conversation page for [LFM3-Omni-2B](https://huggingface.co/LiquidAI/LFM3-Omni-2B) on an Apple Silicon Mac.
+One conversation page for [LFM3-Omni-2B](https://huggingface.co/LiquidAI/LFM3-Omni-2B) on an Apple Silicon Mac or a Windows PC.
 
 - Type to it, talk to it, or attach images, recordings and videos.
 - It answers in writing or out loud.
-- It can call a few tools on your Mac, and it can search and read the web when you allow it.
+- It can call a few tools on your computer, and it can search and read the web when you allow it.
 - Live mode lets you hold a spoken conversation without touching anything.
-- A native macOS window (`native/`) holds the same conversation outside the browser.
+- A native window (`native/`, for macOS and Windows) holds the same conversation outside the browser.
 
-The model runs on your Mac with MLX. Nothing leaves the machine after the one-time model download, unless you turn on Web.
+The model runs on your Mac with MLX, or on a PC with [llama.cpp](https://github.com/ggml-org/llama.cpp) ([Windows](#on-windows)). Nothing leaves the machine after the one-time model download, unless you turn on Web.
 
 ## Start
 
@@ -61,6 +61,40 @@ export LFM3_MODEL="$(.venv/bin/python -m app.pick_model)"   # picks and download
 ```
 
 Then open http://localhost:8765.
+
+### On Windows
+
+Double-click `start.bat`, or in PowerShell:
+
+```powershell
+cd lfm3-omni-lab
+.\start.bat
+```
+
+It needs 64-bit Windows 10 or 11. The first run fetches what's missing, which takes a few minutes:
+
+- Python 3.12, with `winget`, if there's no 64-bit Python 3.10 or newer, then `.venv` and the packages;
+- llama.cpp's `llama-server` (release b12223) into `llama.cpp\`: the CUDA 13 build for an NVIDIA card with driver 580 or newer, CUDA 12 for an older driver, Vulkan for other cards;
+- `ffmpeg`, with `winget`;
+- the model, [`LiquidAI/LFM3-Omni-2B-GGUF`](https://huggingface.co/LiquidAI/LFM3-Omni-2B-GGUF): Q8_0 (2.4 GB with its audio and vision part), or Q4_K_M (1.4 GB) on an NVIDIA card with less than 4 GB of memory.
+
+Web needs agent-browser as on a Mac (`npm install -g agent-browser`, then `agent-browser install`); `start.ps1` reminds you. Everything else works the same as on a Mac, with these differences:
+
+- **Spoken replies are written first, then read out.** llama.cpp doesn't make the model's own interleaved speech, so the text streams as usual and each sentence is spoken with the model's text-to-speech voice as soon as it's written. The first sound comes about a sentence later than on a Mac.
+- Spoken answers after a web search run a little longer (up to about 85 words, against 44-57 with MLX).
+- **Memory** in the performance row is the graphics card's memory the model uses, from `nvidia-smi` (with other cards, llama-server's own memory).
+- HEIC photos are converted with ffmpeg.
+
+| Setting (PowerShell) | How |
+|---|---|
+| Another port | `$env:PORT=8766; .\start.bat` |
+| Another quantization, or your own GGUF file | `$env:LFM3_MODEL='LiquidAI/LFM3-Omni-2B-GGUF:Q4_K_M'` (or a file or folder path) |
+| Another llama.cpp build | `$env:LFM3_LLAMA_BUILD='vulkan'` (`cuda-13.5`, `cuda-12.4`, `vulkan` or `cpu`; delete `llama.cpp\` to download again) |
+| Your own `llama-server.exe` | `$env:LFM3_LLAMA_SERVER='C:\path\to\llama-server.exe'` |
+| Extra `llama-server` options | `$env:LFM3_LLAMA_ARGS='-ngl 20'` |
+| The male voice for spoken replies | `$env:LFM3_VOICE='male'` |
+
+`LFM3_AUTOSTART`, `NO_BROWSER` and `LFM3_BROWSER_HEADED` work as on a Mac. The same llama.cpp path runs on a Mac or Linux with `LFM3_BACKEND=llamacpp` and `LFM3_LLAMA_SERVER` pointing at a `llama-server`, which is how it's tested on a Mac.
 
 ## Using it
 
@@ -174,20 +208,20 @@ With Web on, the model searches more than it needs to. It often looks up things 
 
 ## Native window
 
-`native/` holds the same conversation as a macOS app, so it can live in the Dock instead of a browser tab. It's written in Rust with [Rune](https://github.com/anomalyco/rune) and talks to the lab server the same way the page does, so the server still has to run: start it with `./start.sh`, or with the window's **Start lab server** button.
+`native/` holds the same conversation as a macOS or Windows app, so it can live in the Dock or the taskbar instead of a browser tab. It's written in Rust with [Rune](https://github.com/anomalyco/rune) and talks to the lab server the same way the page does, so the server still has to run: start it with `./start.sh`, or with the window's **Start lab server** button.
 
 ### Downloading it
 
-Each [release](https://github.com/hamsathul/lfm3-omni-lab/releases) has the app ready-built for Apple Silicon: `LFM3-Omni-<version>-macOS-arm64.zip`. Unzip it and move `LFM3-Omni.app` to Applications.
+Each [release](https://github.com/hamsathul/lfm3-omni-lab/releases) has the app ready-built for Apple Silicon: `LFM3-Omni-<version>-macOS-arm64.zip`. Unzip it and move `LFM3-Omni.app` to Applications. Releases from 0.2.0 also have `LFM3-Omni-<version>-windows-x64.zip`, which holds `LFM3-Omni.exe`; it isn't signed, so the first time Windows SmartScreen stops it: click **More info**, then **Run anyway**.
 
 It isn't notarized by Apple, so the first time you open it macOS refuses. Open **System Settings → Privacy & Security** and click **Open Anyway** next to the note about LFM3-Omni. Or remove the download's quarantine flag yourself: `xattr -dr com.apple.quarantine /Applications/LFM3-Omni.app`.
 
 When it can't find the lab, it offers two buttons:
 
-- **Set up the lab** downloads the lab for its version from GitHub into `~/lfm3-omni-lab` and runs `start.sh`. On its first run that makes the Python environment, installs the packages and downloads the model (about 3 GB) if it isn't there yet. The window shows how far it has got.
+- **Set up the lab** downloads the lab for its version from GitHub into `~/lfm3-omni-lab` (on Windows, `%USERPROFILE%\lfm3-omni-lab`) and runs `start.sh` (`start.ps1` on Windows). On its first run that makes the Python environment, installs the packages and downloads the model (about 3 GB) if it isn't there yet. The window shows how far it has got.
 - **Choose lab folder…** points it at a copy you already have.
 
-The lab itself still needs Python 3.10 or newer (`brew install python`). Audio and video need `ffmpeg`, and Web needs `agent-browser` (see [Start](#start)).
+On a Mac the lab itself still needs Python 3.10 or newer (`brew install python`). Audio and video need `ffmpeg`, and Web needs `agent-browser` (see [Start](#start)). On Windows `start.ps1` installs Python and ffmpeg itself (see [On Windows](#on-windows)).
 
 ### Building it
 
@@ -223,6 +257,17 @@ cd lfm3-omni-lab/native
 
 `--dist` also keeps this computer's folder names out of the program. macOS asks for the microphone the first time you record or open live mode, and may ask again after a rebuild, since each build has a new signature.
 
+#### On Windows
+
+You need Rust from [rustup](https://rustup.rs) with its default MSVC toolchain, and Visual Studio's C++ build tools ("Desktop development with C++" in the [Build Tools for Visual Studio](https://visualstudio.microsoft.com/visual-cpp-build-tools/), or `winget install Microsoft.VisualStudio.2022.BuildTools`), which rustup offers to install. Then, in PowerShell:
+
+```powershell
+cd lfm3-omni-lab\native
+powershell -ExecutionPolicy Bypass -File bundle.ps1 -Install
+```
+
+That builds `native\dist\LFM3-Omni.exe`, with its icon, copies it to `%LOCALAPPDATA%\Programs\LFM3-Omni` and adds **LFM3-Omni** to the Start menu. `-Dist` makes the release zip (`native\dist\LFM3-Omni-<version>-windows-x64.zip`) instead. **Start lab server** runs `start.ps1`, hidden, with its output in `data\native-server.log`.
+
 ### What it does
 
 It has:
@@ -232,11 +277,11 @@ It has:
 - voice messages from the microphone button, with what it heard shown under the message;
 - spoken replies that start playing while the rest is made, and **Play** under each one;
 - **Stop** or Esc to end a reply, and **Retry** when one fails;
-- live mode (the orb at the end of the message bar, or Cmd+L) with the page's voice detector, **Mute**, **Interrupt** and a **Talk over** switch;
+- live mode (the orb at the end of the message bar, or Cmd+L; Ctrl+L on Windows) with the page's voice detector, **Mute**, **Interrupt** and a **Talk over** switch;
 - the model's status with Start and Stop, and **Start lab server** when the server isn't running. That runs `start.sh` with its output in `data/native-server.log`, and quitting the app stops it again;
-- Cmd+N for a new chat.
+- Cmd+N (Ctrl+N on Windows) for a new chat.
 
-The reply mode, the three switches and a lab folder chosen in the app are remembered in `~/Library/Application Support/LFM3-Omni Native/prefs.json`.
+The reply mode, the three switches and a lab folder chosen in the app are remembered in `~/Library/Application Support/LFM3-Omni Native/prefs.json` (`%APPDATA%\LFM3-Omni Native\prefs.json` on Windows).
 
 It doesn't have the page's Settings (system prompt, temperature, reply length, read-aloud voice), the reminders list, the Log panel or Read aloud for written replies. Use the page for those; both can be open at once.
 
@@ -266,18 +311,20 @@ It's a 2-billion-parameter model.
 ## How it works
 
 ```
-browser  ──HTTP──>  app/server.py (FastAPI)  ──stdin/stdout JSON lines──>  app/worker.py (MLX model)
+browser  ──HTTP──>  app/server.py (FastAPI)  ──stdin/stdout JSON lines──>  app/worker.py (MLX model, on a Mac)
                     serves the page, converts media                        loads the model once,
                     with ffmpeg, runs the tool loop,                        runs one job at a time,
                     starts/stops the worker                                 streams text and speech
-                          │
+                          │                                          or    app/worker_llamacpp.py (elsewhere)
+                          │                                                 the same protocol, in front of
+                          │                                                 llama-server on a local port
                           └── app/browser.py: a private headless Chrome (agent-browser) for the web tools,
                               every request through app/netguard.py's local-address guard
 ```
 
-The model lives in its own process, so Stop really releases its memory and Restart is a clean reload.
+The model lives in its own process, so Stop really releases its memory and Restart is a clean reload. On llama.cpp the worker starts `llama-server` with two slots: one keeps the conversation's prompt cache, and the other makes speech with `/tts` while the next sentence is still being written. `llama-server` is tied to the worker (a job object on Windows, the parent-death signal on Linux, the server ending the worker's process group on a Mac), so it goes when the worker does, even after a crash. Its log is `data/llama-server.log`; the lines that matter also show in **Log**.
 
-The page keeps the conversation and sends all of it on every turn; the server sends it on to the model. Attachments are converted once, when you add them: audio to 16 kHz WAV, video to H.264 plus its soundtrack, HEIC to JPEG. Audio that peaks near full scale is turned down to peak at 70% (see below). They're kept until the app restarts, and the most recent 8 stay in the model's context.
+The page keeps the conversation and sends all of it on every turn; the server sends it on to the model. Attachments are converted once, when you add them: audio to 16 kHz WAV, video to H.264 plus its soundtrack, HEIC to JPEG. Audio that peaks near full scale is turned down to peak at 50% (see below). They're kept until the app restarts, and the most recent 8 stay in the model's context.
 
 Speech streams as it's made:
 
@@ -308,7 +355,7 @@ A few prompt details matter with this model. Each one was found by testing:
 - **After the first answer, a voice message goes in with its transcript beside it.** Without it, the model sometimes ignored what was said and copied an earlier answer. Asked "Tell me about yourself", then something it couldn't make out, it described itself both times, and then gave the same description to a clear "Tell me a story" (3 of 3 tries with Web on). With the transcript beside the audio it told a story (3 of 3). On a first turn the transcript isn't added: there it made spoken questions call the clock ("Tell me one fun fact about the moon", 4 of 4), and there's no earlier answer to copy. A note in the system prompt asking it to answer the latest message didn't help.
 - **Only the newest photos and videos are shown.** With an earlier photo still in view, "What's in this picture?" about a new one described the old one in 4 of 4 tries, and a note saying which photo was new didn't help. Showing only the newest got all 14 test turns right, follow-ups included, and the model still answered "What did the first sign say?" from its earlier reply.
 - **Transcripts of voice messages** use a system prompt that makes the model a transcription service. Without it, it answers a spoken question instead of writing it down: "What is 17 plus 25?" came back as "42".
-- **Very loud recordings are turned down.** The browser's automatic gain can push a live-mode turn up to full scale. At that level "What time is it in Tokyo right now?" was transcribed as "I don't know the current time in Tokyo." The same recording at 70% volume or lower came back word for word.
+- **Very loud recordings are turned down.** The browser's automatic gain can push a live-mode turn up to full scale. At that level "What time is it in Tokyo right now?" was transcribed as "I don't know the current time in Tokyo." The same recording at 50% volume came back word for word (MLX managed at 70%, llama.cpp only at 50% or lower).
 - **There's no "use the tools" instruction** in the system prompt. The schemas are enough, and with such an instruction the model called the clock before unrelated spoken replies.
 
 ### Long or broken speech
@@ -346,6 +393,8 @@ It drives the same API the page uses, with real media, and ends with the model s
 - stopping the model mid-answer and recovering from a crashed model process.
 
 The web checks need an internet connection.
+
+On Windows run `.venv\Scripts\python tests\smoke_test.py`. Its spoken test questions are made with the Windows speech voices instead of the Mac's `say`, the HEIC check is skipped, and the checkpoint checks cover the GGUF choice instead.
 
 The native window has its own checks, which need no server:
 
