@@ -35,12 +35,12 @@ if [ ! -x .venv/bin/python ]; then
   .venv/bin/pip install -q -r requirements.txt
 fi
 
-if ! .venv/bin/python -c "import playwright" 2>/dev/null; then
-  echo "Installing Playwright, which the Web tools use to drive a browser..."
-  .venv/bin/pip install -q -r requirements.txt
-fi
-if [ ! -d "/Applications/Google Chrome.app" ] && [ ! -d "$HOME/Library/Caches/ms-playwright" ]; then
-  echo "Note: Web uses Google Chrome, which isn't installed. Install it, or run: .venv/bin/playwright install chromium"
+# The Web tools drive a private Chrome through agent-browser (github.com/vercel-labs/agent-browser).
+if ! command -v agent-browser >/dev/null; then
+  echo "Note: Web needs agent-browser: brew install agent-browser (or npm install -g agent-browser), then agent-browser install"
+elif [ ! -d "$HOME/.agent-browser/browsers" ]; then
+  echo "Downloading the browser agent-browser drives (once)..."
+  agent-browser install || echo "Note: agent-browser install failed; Web won't work until it succeeds."
 fi
 
 if ! command -v ffmpeg >/dev/null && [ ! -x /opt/homebrew/bin/ffmpeg ]; then

@@ -294,7 +294,9 @@ const TOOL_NAMES = {
   list_reminders: "List reminders",
   web_search: "Web search",
   open_page: "Open a page",
-  click_link: "Follow a link",
+  click: "Click",
+  type_text: "Type",
+  go_back: "Go back",
 };
 const TOOL_PENDING = {
   get_current_time: "Checking the clock",
@@ -303,7 +305,9 @@ const TOOL_PENDING = {
   list_reminders: "Looking up your reminders",
   web_search: "Searching the web",
   open_page: "Opening a page",
-  click_link: "Following a link",
+  click: "Clicking",
+  type_text: "Typing",
+  go_back: "Going back",
 };
 const TOOL_LABELS = {
   get_current_time: "Checked the clock",
@@ -312,9 +316,11 @@ const TOOL_LABELS = {
   list_reminders: "Looked up your reminders",
   web_search: "Searched the web",
   open_page: "Opened a page",
-  click_link: "Followed a link",
+  click: "Clicked",
+  type_text: "Typed",
+  go_back: "Went back",
 };
-const WEB_TOOLS = new Set(["web_search", "open_page", "click_link"]);
+const WEB_TOOLS = new Set(["web_search", "open_page", "click", "type_text", "go_back"]);
 
 const systemBox = $("#system");
 const tempInput = $("#temperature");
@@ -806,7 +812,9 @@ function toolDetail(name, args, result) {
   if (!result) {
     if (name === "web_search") return `“${args?.query ?? ""}”`;
     if (name === "open_page") return String(args?.url ?? "");
-    if (name === "click_link") return `link ${args?.number ?? ""}`;
+    if (name === "click") return `element ${args?.number ?? ""}`;
+    if (name === "type_text") return `“${args?.text ?? ""}” into ${args?.number ?? ""}${args?.submit === true || args?.submit === "true" ? ", then Enter" : ""}`;
+    if (name === "go_back") return "the previous page";
     return "Running…";
   }
   if (result.error) return result.error;
@@ -818,7 +826,9 @@ function toolDetail(name, args, result) {
     const n = result.results?.length || 0;
     return `“${result.query}”, ${n} result${n === 1 ? "" : "s"} from ${result.engine}`;
   }
-  if (name === "open_page" || name === "click_link") return `${result.title || "Untitled page"}, ${hostOf(result.url)}`;
+  if (name === "click" && result.clicked) return `${result.clicked} → ${result.title || "Untitled page"}, ${hostOf(result.url)}`;
+  if (name === "type_text" && result.typed_into) return `“${args?.text ?? ""}” into the ${result.typed_into} → ${result.title || "Untitled page"}`;
+  if (["open_page", "click", "type_text", "go_back"].includes(name)) return `${result.title || "Untitled page"}, ${hostOf(result.url)}`;
   return JSON.stringify(result);
 }
 
@@ -1319,7 +1329,7 @@ const ORB_STATE = { listening: "listening", hearing: "hearing", muted: "muted", 
 // ---------- live mode: how each reply went ----------
 const PERF_TOOLS = {
   get_current_time: "Clock", calculate: "Calculator", add_reminder: "Reminder", list_reminders: "Reminders",
-  web_search: "Web search", open_page: "Open page", click_link: "Follow link",
+  web_search: "Web search", open_page: "Open page", click: "Click", type_text: "Type", go_back: "Go back",
 };
 const SVG = "http://www.w3.org/2000/svg";
 const svgEl = (tag, attrs) => {
