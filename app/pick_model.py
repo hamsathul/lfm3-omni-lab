@@ -1,19 +1,26 @@
-"""Choose the LFM3-Omni checkpoint for this Mac, and download it if it isn't here yet.
+"""Choose the LFM3-Omni checkpoint for this computer, and download it if it isn't here yet.
 
-start.sh runs this before the app starts. It prints the chosen model id on stdout; anything
-else (the reasoning, download progress) goes to stderr.
+start.sh and start.ps1 run this before the app starts. It prints the chosen model id on stdout;
+anything else (the reasoning, download progress) goes to stderr.
 
   .venv/bin/python -m app.pick_model
 
-LFM3_MODEL picks a checkpoint by hand (a Hugging Face id or a local folder). Without it:
+LFM3_MODEL picks a checkpoint by hand (a Hugging Face id or a local folder). Without it, on a
+Mac (MLX):
 - a Mac with less than 16 GB of memory gets the 4-bit checkpoint (2.1 GB);
 - anything bigger gets the 8-bit one (2.9 GB), which this app is tested with;
 - a checkpoint that's already downloaded and fits the Mac is used as it is, so nobody
   downloads a second copy. bf16 (4.5 GB) is only used when it's already here or asked for:
   on a base chip it can fall behind real time while speaking, and the speech then stutters.
+
+Elsewhere (llama.cpp, or LFM3_BACKEND=llamacpp) it's the GGUF build, model and mmproj:
+- Q8_0 (2.4 GB), which this app is tested with;
+- Q4_K_M (1.4 GB) on an NVIDIA card with less than 4 GB of memory.
+LFM3_MODEL takes LiquidAI/LFM3-Omni-2B-GGUF:<quantization>, a folder or a .gguf file there.
 """
 
 import os
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -22,6 +29,8 @@ REPO = "LiquidAI/LFM3-Omni-2B-MLX-{}"
 SIZES_GB = {"4bit": 2.1, "8bit": 2.9, "bf16": 4.5}
 NEEDS_MEMORY_GB = {"4bit": 0, "8bit": 16, "bf16": 16}
 REQUIRED = ["config.json", "tokenizer.json", "audio_tokenizer/config.json"]
+GGUF_REPO = "LiquidAI/LFM3-Omni-2B-GGUF"
+GGUF_SIZES_GB = {"Q8_0": 2.4, "Q4_K_M": 1.4, "Q4_0": 1.3, "F16": 4.4, "BF16": 4.4}
 
 
 def say(text):
@@ -70,7 +79,68 @@ def download(repo_id, size_gb=None):
     return folder
 
 
+def gpu_memory_mb():
+    smi = shutil.which("nvidia-smi")
+    if not smi:
+        return None
+    try:
+        out = subprocess.run([smi, "--query-gpu=memory.total", "--format=csv,noheader,nounits"],
+                             capture_output=True, text=True, timeout=10).stdout
+        return float(out.split()[0])
+    except (OSError, ValueError, IndexError, subprocess.SubprocessError):
+        return None
+
+
+def gguf_files(repo, quant):
+    name = repo.split("/")[-1].removesuffix("-GGUF")
+    return [f"{name}-{quant}.gguf", f"mmproj-{name}-{quant}.gguf"]
+
+
+def gguf_main():
+    chosen = os.environ.get("LFM3_MODEL", "").strip()
+    if chosen and Path(chosen).exists():
+        say(f"Model: {chosen}")
+        print(chosen)
+        return
+    if chosen:
+        repo, _, quant = chosen.partition(":")
+    else:
+        vram = gpu_memory_mb()
+        repo, quant = GGUF_REPO, ("Q4_K_M" if vram is not None and vram < 4096 else "Q8_0")
+        if quant != "Q8_0":
+            say(f"This GPU has {vram / 1024:.1f} GB of memory, so the lab uses the smaller Q4_K_M model.")
+    quant = (quant or "Q8_0").upper()
+    from huggingface_hub import hf_hub_download
+    files = gguf_files(repo, quant)
+    missing = []
+    for filename in files:
+        try:
+            hf_hub_download(repo, filename, local_files_only=True)
+        except Exception:
+            missing.append(filename)
+    if not missing:
+        say(f"Model: {repo} {quant} (already downloaded)")
+    else:
+        size = GGUF_SIZES_GB.get(quant)
+        say(f"Downloading {repo} {quant}" + (f" ({size} GB)" if size else "") + " from Hugging Face...")
+        for filename in missing:
+            try:
+                hf_hub_download(repo, filename)
+            except Exception as exc:
+                say(f"Couldn't download {filename}: {exc}")
+                say("Check the internet connection and start the lab again; a partial download resumes.")
+                sys.exit(1)
+    print(f"{repo}:{quant}")
+
+
+def backend():
+    return os.environ.get("LFM3_BACKEND") or ("mlx" if sys.platform == "darwin" else "llamacpp")
+
+
 def main():
+    if backend() != "mlx":
+        gguf_main()
+        return
     chosen = os.environ.get("LFM3_MODEL", "").strip()
     if chosen:
         if Path(chosen).is_dir():

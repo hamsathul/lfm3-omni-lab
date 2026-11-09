@@ -229,7 +229,8 @@ function renderStatus() {
   $("#state-word").textContent = word;
   $("#state-detail").textContent = detail(status);
   if (status.model) $("#model-id").textContent = status.model;
-  // MLX's own count: the process RSS leaves out the GPU-side buffers that hold the weights.
+  // The model's own count (MLX's, or the GPU memory llama.cpp took): the process RSS leaves out
+  // the GPU-side buffers that hold the weights.
   $("#fact-mem").textContent = fmtGB(status.memory_gb);
   $("#fact-load").textContent = status.load_seconds != null ? `${status.load_seconds} s` : "–";
   $("#fact-up").textContent = fmtDuration(status.uptime_seconds);
@@ -331,6 +332,9 @@ const liveWeb = $("#live-web");
 
 async function loadOptions() {
   try { options = await (await fetch("/api/options")).json(); } catch { return; }
+  // "Mac" or "PC": where the model runs, in the page's wording.
+  for (const el of $$("[data-computer]")) el.textContent = options.computer || "Mac";
+  STARTERS.aloud.text = STARTERS.aloud.text.replace("this Mac", `this ${options.computer || "Mac"}`);
   systemBox.placeholder = options.default_system;
   systemBox.value = prefs.get("system", options.default_system);
   const languages = $("#tts-language");

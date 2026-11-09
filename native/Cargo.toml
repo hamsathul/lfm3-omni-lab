@@ -21,6 +21,10 @@ cpal = "0.18"
 serde_json = "1"
 ureq = { version = "3", default-features = false }
 
+[build-dependencies]
+# The Windows program's icon (build.rs); unused elsewhere.
+winresource = "0.1"
+
 [profile.dev]
 opt-level = 1
 

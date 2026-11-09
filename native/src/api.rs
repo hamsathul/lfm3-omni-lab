@@ -27,6 +27,8 @@ pub struct ModelStatus {
     pub state: String,
     pub busy: bool,
     pub model: String,
+    /// "mlx" on a Mac, "llamacpp" elsewhere.
+    pub backend: String,
     pub starting_seconds: Option<i64>,
     pub memory_gb: Option<f64>,
     pub error: Option<String>,
@@ -36,6 +38,7 @@ impl ModelStatus {
     pub fn from_json(v: &Value) -> ModelStatus {
         ModelStatus {
             state: v["state"].as_str().unwrap_or("error").to_string(),
+            backend: v["backend"].as_str().unwrap_or("mlx").to_string(),
             busy: v["busy"].as_bool().unwrap_or(false),
             model: v["model"].as_str().unwrap_or("").to_string(),
             starting_seconds: v["starting_seconds"].as_i64(),

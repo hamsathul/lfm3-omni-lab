@@ -1,4 +1,10 @@
-mlx-vlm>=0.7.11
+# The model runs with MLX on a Mac and in llama.cpp (llama-server, fetched by start.ps1) elsewhere.
+mlx-vlm>=0.7.11; sys_platform == "darwin"
 fastapi>=0.110
 uvicorn>=0.29
 python-multipart>=0.0.9
+numpy
+pillow
+huggingface_hub
+# Windows has no time zone database of its own.
+tzdata; sys_platform == "win32"

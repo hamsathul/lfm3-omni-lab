@@ -33,6 +33,7 @@ fn status(state: &str) -> ModelStatus {
         state: state.into(),
         busy: false,
         model: "LiquidAI/LFM3-Omni-2B-MLX-8bit".into(),
+        backend: "mlx".into(),
         starting_seconds: None,
         memory_gb: if state == "ready" { Some(3.1) } else { None },
         error: None,
