@@ -3,7 +3,8 @@
 Each tool is an OpenAI-style schema (what the model sees, via the chat template)
 plus a Python implementation (what the app runs when the model asks for it).
 The "local" group runs on this Mac and never touches the network; the "web" group
-drives a headless Chrome (app/browser.py) and is offered only when Web is on.
+drives a private headless Chrome through agent-browser (app/browser.py) and is offered
+only when Web is on.
 """
 
 import ast
@@ -156,15 +157,25 @@ TOOLS = {  # name -> (group, schema, function)
                 ["query"]),
         browser.web_search),
     "open_page": ("web",
-        _schema("open_page", "Open a web page in the browser and read its text and links.",
+        _schema("open_page", "Open a web page in the browser and read its text and the numbered things on it: links, buttons and text boxes.",
                 {"url": {"type": "string", "description": "A full address such as https://example.com, or the number of a search result"}},
                 ["url"]),
         browser.open_page),
-    "click_link": ("web",
-        _schema("click_link", "Follow one of the numbered links on the page that is open in the browser.",
-                {"number": {"type": "integer", "description": "The link's number from the open page"}},
+    "click": ("web",
+        _schema("click", "Click a link, button or checkbox on the page that is open in the browser, by its number.",
+                {"number": {"type": "integer", "description": "The element's number from the open page"}},
                 ["number"]),
-        browser.click_link),
+        browser.click),
+    "type_text": ("web",
+        _schema("type_text", "Type into a text box on the page that is open in the browser, by its number. Set submit to true to press Enter afterwards, for example to run a search.",
+                {"number": {"type": "integer", "description": "The text box's number from the open page"},
+                 "text": {"type": "string", "description": "What to type"},
+                 "submit": {"type": "boolean", "description": "Press Enter after typing"}},
+                ["number", "text"]),
+        browser.type_text),
+    "go_back": ("web",
+        _schema("go_back", "Go back to the previous page in the browser."),
+        browser.go_back),
 }
 WEB_TOOLS = {name for name, (group, _, _) in TOOLS.items() if group == "web"}
 

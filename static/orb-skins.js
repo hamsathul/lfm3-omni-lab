@@ -89,7 +89,7 @@ export async function wear(orb, id, analyser = () => null) {
 
 // ---- Thinking Orbs: a small orb for each kind of work ---------------------------------
 const VERB = {
-  web_search: "searching", open_page: "connecting", click_link: "connecting",
+  web_search: "searching", open_page: "connecting", click: "connecting", type_text: "connecting", go_back: "connecting",
   calculate: "solving", get_current_time: "working", add_reminder: "working", list_reminders: "working",
 };
 export const verbFor = (tool) => VERB[tool] || "working";

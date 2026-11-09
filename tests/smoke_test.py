@@ -165,7 +165,7 @@ def main():
     check("options list the tools and voices",
           [(t["name"], t["group"]) for t in options["tools"]] == [
               ("get_current_time", "local"), ("calculate", "local"), ("add_reminder", "local"), ("list_reminders", "local"),
-              ("web_search", "web"), ("open_page", "web"), ("click_link", "web")]
+              ("web_search", "web"), ("open_page", "web"), ("click", "web"), ("type_text", "web"), ("go_back", "web")]
           and "Arabic" in options["tts_languages"] and options["default_system"])
     for asset in ("/orb.js",):
         conn, resp = request("GET", asset)
@@ -518,13 +518,23 @@ def main():
                            web=True, must_contain=["Example Domain"], tools_used=["open_page"])
     web_events += events
     turn("web: follows a link on the open page", "Follow link 1 on that page and tell me the new page's title.",
-         history=h, web=True, tools_used=["click_link"])
+         history=h, web=True, tools_used=["click"])
+    h, done, events = turn("web: types into a page's search box and submits it",
+                           "Open https://en.wikipedia.org/wiki/Main_Page, search it for the Eiffel Tower with the page's "
+                           "search box, and tell me how tall the tower is.",
+                           web=True, tools_used=["open_page", "type_text"], must_contain=["330"])
+    web_events += events
+    typed = next((e.get("result") or {} for e in events if e.get("event") == "tool_result" and e["name"] == "type_text"), {})
+    check("web: typing reports what it typed into and lands on the result", "search box" in str(typed.get("typed_into"))
+          and "Eiffel" in str(typed.get("title")), f"{typed.get('typed_into')} -> {typed.get('title')}")
+    turn("web: goes back a page", "Go back to the previous page and tell me its title.", history=h, web=True,
+         tools_used=["go_back"], must_contain=["Wikipedia"])
     # The model sometimes declines a local address by itself; when it does try, the browser must refuse.
     tried, opened = [], []
     for address in ("http://localhost:8765", "http://127.0.0.1:8765", "http://192.168.1.1"):
         events = chat(f"Open {address} and tell me what it says.", web=True)[1]
         for e in events:
-            if e.get("event") == "tool_result" and e["name"] in ("open_page", "click_link"):
+            if e.get("event") == "tool_result" and e["name"] in ("open_page", "click"):
                 error = str((e.get("result") or {}).get("error", ""))
                 (tried if "can't be opened" in error else opened).append(f"{address}: {error or e['result'].get('title')}")
     check("web: a local address is never opened, and the refusal says why", tried and not opened,
