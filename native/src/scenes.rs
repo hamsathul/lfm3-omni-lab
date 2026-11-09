@@ -8,6 +8,8 @@ use std::sync::Arc;
 
 pub const SCENES: &[(&str, fn(&mut State))] = &[
     ("offline", offline),
+    ("no-lab", no_lab),
+    ("launching", launching),
     ("stopped", stopped),
     ("empty", ready),
     ("chat", chat),
@@ -37,6 +39,17 @@ fn status(state: &str) -> ModelStatus {
     }
 }
 
+fn no_lab(s: &mut State) {
+    offline(s);
+    s.lab_dir = None;
+}
+
+fn launching(s: &mut State) {
+    offline(s);
+    s.launching_at = Some(0.0);
+    s.launch_line = Some("model-q8.safetensors:  41%|████      | 1.19G/2.90G [00:38<00:52, 32.6MB/s]".into());
+}
+
 fn offline(s: &mut State) {
     s.server = Server::Down { since: -10.0, error: "Can't reach the lab server (Connection refused).".into() };
 }
@@ -51,7 +64,7 @@ fn ready(s: &mut State) {
 
 fn sample_image(s: &mut State) -> Option<rune::Image> {
     let cache = s.images.get_or_insert_with(|| Arc::new(rune::ImageCache::new(Arc::new(|| {})))).clone();
-    let path = s.lab_dir.join("static/samples/sign.png");
+    let path = s.lab_dir.clone().unwrap_or_default().join("static/samples/sign.png");
     let img = cache.file(path, 240.0, 2.0);
     let _ = img.wait();
     Some(img)

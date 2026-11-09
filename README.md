@@ -176,6 +176,19 @@ With Web on, the model searches more than it needs to. It often looks up things 
 
 `native/` holds the same conversation as a macOS app, so it can live in the Dock instead of a browser tab. It's written in Rust with [Rune](https://github.com/anomalyco/rune) and talks to the lab server the same way the page does, so the server still has to run: start it with `./start.sh`, or with the window's **Start lab server** button.
 
+### Downloading it
+
+Each [release](https://github.com/hamsathul/lfm3-omni-lab/releases) has the app ready-built for Apple Silicon: `LFM3-Omni-<version>-macOS-arm64.zip`. Unzip it and move `LFM3-Omni.app` to Applications.
+
+It isn't notarized by Apple, so the first time you open it macOS refuses. Open **System Settings → Privacy & Security** and click **Open Anyway** next to the note about LFM3-Omni. Or remove the download's quarantine flag yourself: `xattr -dr com.apple.quarantine /Applications/LFM3-Omni.app`.
+
+When it can't find the lab, it offers two buttons:
+
+- **Set up the lab** downloads the lab for its version from GitHub into `~/lfm3-omni-lab` and runs `start.sh`. On its first run that makes the Python environment, installs the packages and downloads the model (about 3 GB) if it isn't there yet. The window shows how far it has got.
+- **Choose lab folder…** points it at a copy you already have.
+
+The lab itself still needs Python 3.10 or newer (`brew install python`). Audio and video need `ffmpeg`, and Web needs `agent-browser` (see [Start](#start)).
+
 ### Building it
 
 You need:
@@ -199,8 +212,16 @@ cd lfm3-omni-lab/native
 | Build just the program | `cargo build --release` (it's `native/target/release/lfm3-omni`) |
 | Run it without making an app | `cargo run --release` |
 | Update it after a `git pull` | `./bundle.sh --install` |
+| Make the zip for a release | `./bundle.sh --dist` (it's `native/dist/LFM3-Omni-<version>-macOS-arm64.zip`) |
 
-The app remembers the folder it was built from: that's where **Start lab server** runs `start.sh`. If you move the checkout, build it again or set `LFM3_LAB_DIR`. macOS asks for the microphone the first time you record or open live mode, and may ask again after a rebuild, since each build has a new signature.
+**Start lab server** runs `start.sh` in the lab folder. To find that folder, the app looks in this order:
+
+1. `LFM3_LAB_DIR`;
+2. a folder chosen in the app;
+3. the checkout it was built from (not for a `--dist` build, which is made for other computers);
+4. `lfm3-omni-lab` in your home folder, or in `projects`, `Developer`, `code`, `src`, `GitHub`, `Documents`, `Desktop` or `Downloads`.
+
+`--dist` also keeps this computer's folder names out of the program. macOS asks for the microphone the first time you record or open live mode, and may ask again after a rebuild, since each build has a new signature.
 
 ### What it does
 
@@ -215,7 +236,7 @@ It has:
 - the model's status with Start and Stop, and **Start lab server** when the server isn't running. That runs `start.sh` with its output in `data/native-server.log`, and quitting the app stops it again;
 - Cmd+N for a new chat.
 
-The reply mode and the three switches are remembered in `~/Library/Application Support/LFM3-Omni Native/prefs.json`.
+The reply mode, the three switches and a lab folder chosen in the app are remembered in `~/Library/Application Support/LFM3-Omni Native/prefs.json`.
 
 It doesn't have the page's Settings (system prompt, temperature, reply length, read-aloud voice), the reminders list, the Log panel or Read aloud for written replies. Use the page for those; both can be open at once.
 
@@ -330,8 +351,8 @@ The native window has its own checks, which need no server:
 
 ```bash
 cd native
-cargo test                    # the voice detector, audio, Markdown and API pieces
-cargo test -- --ignored       # plays a second of near-silence on the real speaker
+cargo test                    # the voice detector, audio, Markdown, API and lab-finding pieces
+cargo test -- --ignored       # plays near-silence on the real speaker, and downloads the lab from GitHub
 cargo run -- --snap chat.png --scene chat    # draws one screen; see src/scenes.rs for the rest
 ```
 

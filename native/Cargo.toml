@@ -2,13 +2,17 @@
 name = "lfm3-native"
 version = "0.1.0"
 edition = "2024"
-description = "Native macOS window for LFM3-Omni Lab, drawn with Rune"
+description = "Native window for LFM3-Omni Lab on macOS and Windows, drawn with Rune"
 license = "MIT"
 publish = false
 
 [[bin]]
 name = "lfm3-omni"
 path = "src/main.rs"
+
+[features]
+# A build for the GitHub release: it doesn't remember the folder it was built in (see src/lab.rs).
+dist = []
 
 [dependencies]
 rune = { git = "https://github.com/anomalyco/rune", rev = "a6a59e697df7e7a7c95b91c915d1a24e00681760", features = ["native-file-dialog"] }
