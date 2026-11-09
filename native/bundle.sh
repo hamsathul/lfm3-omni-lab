@@ -3,8 +3,12 @@
 # icon and microphone permission text, signed ad hoc so macOS remembers the mic permission.
 #   ./bundle.sh            -> dist/LFM3-Omni.app
 #   ./bundle.sh --install  -> also copies it to ~/Applications
-# The app finds the lab folder this was built from (or $LFM3_LAB_DIR), and talks to the lab
-# server on port 8765; it can start that server itself.
+#   ./bundle.sh --dist     -> a build for the GitHub release, zipped as
+#                             dist/LFM3-Omni-<version>-macOS-<arch>.zip
+# The app talks to the lab server on port 8765 and can start that server itself. A normal
+# build finds the lab in the folder it was built from; a --dist build looks in the usual
+# places, or offers to download the lab (see src/lab.rs and src/setup.rs). --dist also keeps
+# this computer's folder names out of the program.
 # The icon is the app's own "icon" scene: to redraw assets/icon-1024.png after changing it,
 #   cargo run -- --snap assets/icon-1024.png --scene icon --size 512x512 --scale 2
 # then make AppIcon.icns from it with sips and iconutil.
@@ -14,13 +18,32 @@ cd "$(dirname "$0")"
 APP=dist/LFM3-Omni.app
 VERSION="$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)"
 
+INSTALL=0
+DIST=0
+for arg in "$@"; do
+  case "$arg" in
+    --install) INSTALL=1 ;;
+    --dist) DIST=1 ;;
+    *) echo "Unknown option: $arg (use --install or --dist)"; exit 1 ;;
+  esac
+done
+
 if ! command -v cargo >/dev/null && [ -f "$HOME/.cargo/env" ]; then
   . "$HOME/.cargo/env"
 fi
-cargo build --release
+if [ "$DIST" = 1 ]; then
+  # Its own target folder, since the changed flags rebuild everything.
+  export CARGO_TARGET_DIR=target/dist
+  export CARGO_ENCODED_RUSTFLAGS="--remap-path-prefix=$HOME=~"
+  cargo build --release --features dist
+  BIN=target/dist/release/lfm3-omni
+else
+  cargo build --release
+  BIN=target/release/lfm3-omni
+fi
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
-cp target/release/lfm3-omni "$APP/Contents/MacOS/lfm3-omni"
+cp "$BIN" "$APP/Contents/MacOS/lfm3-omni"
 cp assets/AppIcon.icns "$APP/Contents/Resources/AppIcon.icns"
 
 cat > "$APP/Contents/Info.plist" <<PLIST
@@ -48,7 +71,18 @@ PLIST
 codesign --force --sign - "$APP"
 echo "Built $APP ($VERSION)"
 
-if [ "${1:-}" = "--install" ]; then
+if [ "$DIST" = 1 ]; then
+  if strings "$BIN" | grep -qF "$HOME"; then
+    echo "The release build still names $HOME; not zipping it."
+    exit 1
+  fi
+  ZIP="dist/LFM3-Omni-$VERSION-macOS-$(uname -m).zip"
+  rm -f "$ZIP"
+  ditto -c -k --keepParent "$APP" "$ZIP"
+  echo "Release zip: native/$ZIP ($(du -h "$ZIP" | cut -f1 | tr -d ' '))"
+fi
+
+if [ "$INSTALL" = 1 ]; then
   mkdir -p "$HOME/Applications"
   rm -rf "$HOME/Applications/LFM3-Omni.app"
   cp -R "$APP" "$HOME/Applications/"

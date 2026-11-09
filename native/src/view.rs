@@ -176,28 +176,67 @@ fn toggle(label: &str, on: bool, p: &Pal, help: &str) -> El {
 
 fn server_down(s: &State, p: &Pal, error: &str) -> El {
     let launching = s.launching_at.is_some();
-    let mut card = col().max_w(440.0).gap(14.0).items_center()
-        .child(orb::orb(120.0, s.now as f32, if launching { Mood::Thinking } else { Mood::Muted }, 0.0, p.dark))
-        .child(text(if launching { "Starting the lab server…" } else { "The lab server isn't running" }).font(look::HEADLINE).color(p.text))
-        .child(
-            text(if launching {
-                "The first start sets up Python and can take a minute. Its output goes to data/native-server.log."
-                    .to_string()
-            } else {
-                format!("This window talks to LFM3-Omni Lab at {}. Start it here, or run ./start.sh yourself.", s.api.base)
-            })
-            .font(look::BODY)
-            .color(p.text2)
-            .wrap()
-            .align(rune::Align::Center),
-        );
-    if !launching {
-        card = card.child(
-            el().key("launch").h(36.0).px(18.0).center().radius(18.0).fill(p.mine).cursor(Cursor::Pointer)
-                .child(text("Start lab server").font(look::BODY_BOLD).color(Color::WHITE))
-                .on_press(|s: &mut State| s.launch_server()),
-        );
-        card = card.child(text(error.to_string()).font(look::SMALL).color(p.text3).wrap().align(rune::Align::Center));
+    let fetching = s.fetching_lab;
+    let busy = launching || fetching;
+    let (title, body) = if fetching {
+        ("Downloading the lab…".to_string(), format!("Getting LFM3-Omni Lab from {} into your home folder.", crate::setup::REPO.trim_start_matches("https://")))
+    } else if launching {
+        (
+            "Starting the lab server…".to_string(),
+            "The first start installs its Python packages and downloads the model (about 3 GB), which takes a while. \
+             Later starts take seconds."
+                .to_string(),
+        )
+    } else if s.lab_dir.is_none() {
+        (
+            "Set up LFM3-Omni Lab".to_string(),
+            format!(
+                "This window talks to LFM3-Omni Lab, which runs the model on this computer. Set it up here: it downloads \
+                 the lab into {}, installs what it needs and the model (about 3 GB), and starts it. Or choose a copy you already have.",
+                crate::setup::default_dir().map_or("your home folder".into(), |d| crate::setup::shown(&d))
+            ),
+        )
+    } else {
+        (
+            "The lab server isn't running".to_string(),
+            format!("This window talks to LFM3-Omni Lab at {}. Start it here, or run {} yourself.", s.api.base, crate::lab::START),
+        )
+    };
+    let mut card = col().max_w(460.0).gap(14.0).items_center()
+        .child(orb::orb(120.0, s.now as f32, if busy { Mood::Thinking } else { Mood::Muted }, 0.0, p.dark))
+        .child(text(title).font(look::HEADLINE).color(p.text))
+        .child(text(body).font(look::BODY).color(p.text2).wrap().align(rune::Align::Center));
+    if launching {
+        if let Some(line) = &s.launch_line {
+            card = card.child(text(line.clone()).font(look::SMALL).color(p.text3).wrap().align(rune::Align::Center));
+        }
+    }
+    let button = |key: &'static str, label: &str, primary: bool| {
+        el().key(key).h(36.0).px(18.0).center().radius(18.0).cursor(Cursor::Pointer)
+            .fill(if primary { p.mine } else { p.control })
+            .child(text(label.to_string()).font(look::BODY_BOLD).color(if primary { Color::WHITE } else { p.text }))
+    };
+    let choose = |label: &str, primary: bool| {
+        button("choose-lab", label, primary).on_press_tx(|_: &mut State, tx: &mut Tx| {
+            let options = rune::FileDialogOptions { title: "Choose the LFM3-Omni Lab folder".into(), ..Default::default() };
+            tx.open_folder(options, |s: &mut State, result, _| {
+                if let Ok(Some(dir)) = result {
+                    s.choose_lab(dir);
+                }
+            });
+        })
+    };
+    if !busy {
+        let buttons = if s.lab_dir.is_none() {
+            row().gap(10.0)
+                .child(button("fetch-lab", "Set up the lab", true).on_press(|s: &mut State| s.fetch_lab()))
+                .child(choose("Choose lab folder…", false))
+        } else {
+            row().gap(10.0).child(button("launch", "Start lab server", true).on_press(|s: &mut State| s.launch_server()))
+        };
+        card = card.child(buttons);
+        let detail = s.lab_problem.clone().unwrap_or_else(|| error.to_string());
+        card = card.child(text(detail).font(look::SMALL).color(if s.lab_problem.is_some() { p.text2 } else { p.text3 }).wrap().align(rune::Align::Center));
     }
     col().grow(1.0).w_full().center().padding(24.0).child(card)
 }

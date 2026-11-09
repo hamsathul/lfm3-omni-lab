@@ -25,6 +25,8 @@ pub enum Ev {
     Picture { msg: u64, step: usize, bytes: Vec<u8> },
     Replay { msg: u64, clip: Result<(Vec<f32>, u32), String> },
     Sample { name: String, bytes: Result<Vec<u8>, String>, starter: usize },
+    /// "Set up the lab" finished downloading it, or couldn't.
+    LabFetched(Result<PathBuf, String>),
 }
 
 pub enum TurnEv {
@@ -240,7 +242,14 @@ pub enum Server {
 
 pub struct State {
     pub api: Api,
-    pub lab_dir: PathBuf,
+    /// The lab folder, for "Start lab server"; None when this app can't find one.
+    pub lab_dir: Option<PathBuf>,
+    /// Why the lab couldn't be set up, chosen or started, for the offline card.
+    pub lab_problem: Option<String>,
+    pub fetching_lab: bool,
+    /// The newest line of the starting server's output (installing, downloading the model).
+    pub launch_line: Option<String>,
+    launch_read_at: f64,
     pub net: bool,
     pub events: Receiver<Ev>,
     pub sender: Sender<Ev>,
@@ -275,12 +284,16 @@ pub struct State {
 }
 
 impl State {
-    pub fn new(base: &str, lab_dir: PathBuf, net: bool, sound: bool) -> State {
+    pub fn new(base: &str, lab_dir: Option<PathBuf>, net: bool, sound: bool) -> State {
         let (sender, events) = channel();
         let prefs = crate::prefs::load();
         State {
             api: Api::new(base),
             lab_dir,
+            lab_problem: None,
+            fetching_lab: false,
+            launch_line: None,
+            launch_read_at: 0.0,
             net,
             events,
             sender,
@@ -404,40 +417,83 @@ impl State {
         });
     }
 
-    /// Start the lab server (start.sh, without opening the browser) when none is running.
+    /// Start the lab server (its start script, without opening the browser) when none is running.
     pub fn launch_server(&mut self) {
         if self.launched.is_some() {
             return;
         }
+        let Some(lab) = self.lab_dir.clone() else { return };
         let port = self.api.base.rsplit(':').next().and_then(|p| p.parse::<u16>().ok()).unwrap_or(8765);
-        let log = self.lab_dir.join("data").join("native-server.log");
-        let _ = std::fs::create_dir_all(self.lab_dir.join("data"));
-        let out = std::fs::File::create(&log).ok();
-        let mut cmd = std::process::Command::new("/bin/bash");
-        // Opened from Finder the app has a bare PATH; start.sh and the server look for Homebrew's
-        // python and ffmpeg.
-        let path = std::env::var("PATH").unwrap_or_default();
-        let path = format!("/opt/homebrew/bin:/usr/local/bin:{}", if path.is_empty() { "/usr/bin:/bin:/usr/sbin:/sbin" } else { &path });
-        cmd.arg("start.sh").current_dir(&self.lab_dir).env("NO_BROWSER", "1").env("PORT", port.to_string()).env("PATH", path);
-        if let Some(out) = out {
-            if let Ok(err) = out.try_clone() {
-                cmd.stderr(err);
-            }
-            cmd.stdout(out);
-        }
-        match cmd.spawn() {
+        self.lab_problem = None;
+        self.launch_line = None;
+        match crate::setup::start(&lab, port) {
             Ok(child) => {
                 self.launched = Some(child);
                 self.launching_at = Some(self.now);
             }
-            Err(e) => self.note(format!("Couldn't start the lab server: {e}")),
+            Err(e) => self.lab_problem = Some(format!("Couldn't start the lab server: {e}")),
         }
     }
 
-    /// Stop a server this app started (SIGTERM, so it stops the model on its way out).
+    /// Stop a server this app started.
     pub fn stop_launched_server(&mut self) {
-        if let Some(child) = self.launched.take() {
-            let _ = std::process::Command::new("kill").arg("-TERM").arg(child.id().to_string()).status();
+        if let Some(mut child) = self.launched.take() {
+            crate::setup::stop(&mut child);
+        }
+    }
+
+    /// Use a lab folder picked in the app, and start it.
+    pub fn choose_lab(&mut self, dir: PathBuf) {
+        if crate::lab::is_lab(&dir) {
+            crate::prefs::save_lab_dir(&dir);
+            self.lab_dir = Some(dir);
+            self.launch_server();
+        } else {
+            self.lab_problem = Some(format!(
+                "{} isn't the lab: it has no {}. Choose the folder you cloned or downloaded from GitHub.",
+                dir.display(),
+                crate::lab::START
+            ));
+        }
+    }
+
+    /// Download the lab into ~/lfm3-omni-lab, then start it (which installs it and gets the model).
+    pub fn fetch_lab(&mut self) {
+        if self.fetching_lab {
+            return;
+        }
+        let Some(dest) = crate::setup::default_dir() else {
+            self.lab_problem = Some("There's no home folder to put the lab in.".into());
+            return;
+        };
+        self.fetching_lab = true;
+        self.lab_problem = None;
+        let (sender, waker) = (self.sender.clone(), self.waker.clone());
+        std::thread::spawn(move || {
+            let _ = sender.send(Ev::LabFetched(crate::setup::fetch(&dest)));
+            waker();
+        });
+    }
+
+    /// While a server this app started is starting: follow its output, and notice if it quits.
+    fn watch_launch(&mut self, now: f64) {
+        let Some(child) = &mut self.launched else { return };
+        let exited = matches!(child.try_wait(), Ok(Some(_)));
+        let starting = self.launching_at.is_some();
+        if !starting && !exited {
+            return;
+        }
+        if exited || now - self.launch_read_at >= 0.4 {
+            self.launch_read_at = now;
+            self.launch_line = self.lab_dir.as_deref().and_then(|lab| crate::setup::last_line(&crate::setup::log_path(lab)));
+        }
+        if exited {
+            self.launched = None;
+            if starting {
+                self.launching_at = None;
+                let said = self.launch_line.take().unwrap_or_else(|| "it stopped without saying why".into());
+                self.lab_problem = Some(format!("The lab server stopped: {said}"));
+            }
         }
     }
 
@@ -766,6 +822,11 @@ impl State {
                 changed = true;
             }
         }
+        if self.launched.is_some() {
+            let before = (self.launching_at.is_some(), self.launch_line.clone());
+            self.watch_launch(now);
+            changed |= before != (self.launching_at.is_some(), self.launch_line.clone());
+        }
         if self.launching_at.is_some() && !matches!(self.server, Server::Up(_)) {
             tx.wake_after(std::time::Duration::from_millis(500));
             changed = true;
@@ -856,6 +917,13 @@ impl State {
             Ev::Status(Err(error)) => {
                 if !matches!(self.server, Server::Down { .. }) {
                     self.server = Server::Down { since: self.now, error };
+                }
+            }
+            Ev::LabFetched(result) => {
+                self.fetching_lab = false;
+                match result {
+                    Ok(dir) => self.choose_lab(dir),
+                    Err(e) => self.lab_problem = Some(e),
                 }
             }
             Ev::ModelAction(result) => {
