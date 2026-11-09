@@ -1,0 +1,7 @@
+{"events": [
+  {"t": 2.0, "type": "tap", "key": "starter-0"},
+  {"t": 14.0, "type": "tap", "key": "draft"},
+  {"t": 14.2, "type": "type", "text": "What colour is it?"},
+  {"t": 17.0, "type": "key", "name": "Enter"},
+  {"t": 30.0, "type": "mark", "name": "end"}
+]}

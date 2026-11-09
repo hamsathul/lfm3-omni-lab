@@ -6,6 +6,7 @@ One conversation page for [LFM3-Omni-2B](https://huggingface.co/LiquidAI/LFM3-Om
 - It answers in writing or out loud.
 - It can call a few tools on your Mac, and it can search and read the web when you allow it.
 - Live mode lets you hold a spoken conversation without touching anything.
+- A native macOS window (`native/`) holds the same conversation outside the browser.
 
 The model runs on your Mac with MLX. Nothing leaves the machine after the one-time model download, unless you turn on Web.
 
@@ -18,7 +19,7 @@ cd ~/projects/lfm3-omni-lab
 
 It needs a Mac with Apple Silicon (M1 or later) and Python 3.10 or newer. macOS's own `python3` is 3.9, so the script looks for a newer one (`brew install python` if there isn't one).
 
-The first run creates `.venv` and installs `mlx-vlm` and Playwright, which takes a minute or two. Then the script picks the model checkpoint for this Mac and downloads it if it isn't already here:
+The first run creates `.venv` and installs `mlx-vlm`, which takes a minute or two. Then the script picks the model checkpoint for this Mac and downloads it if it isn't already here:
 
 | This Mac | Checkpoint | Download |
 |---|---|---|
@@ -34,7 +35,7 @@ The page opens at http://localhost:8765.
 - **Restart** reloads it in a fresh process.
 - Ctrl+C in the terminal quits the app and stops the model.
 
-Audio, recording and video need `ffmpeg` (`brew install ffmpeg`). Web needs Google Chrome, or Playwright's own Chromium (`.venv/bin/playwright install chromium`).
+Audio, recording and video need `ffmpeg` (`brew install ffmpeg`). Web needs [agent-browser](https://github.com/vercel-labs/agent-browser): `brew install agent-browser`, then `agent-browser install` to download the Chrome it drives.
 
 | Setting | How |
 |---|---|
@@ -43,6 +44,23 @@ Audio, recording and video need `ffmpeg` (`brew install ffmpeg`). Web needs Goog
 | Load the model as soon as the app starts | `LFM3_AUTOSTART=1 ./start.sh` |
 | Don't open a browser tab | `NO_BROWSER=1 ./start.sh` |
 | Watch the web browser work in a visible window | `LFM3_BROWSER_HEADED=1 ./start.sh` |
+
+### Setting it up by hand
+
+`start.sh` does all of this for you. To do it yourself:
+
+```bash
+git clone https://github.com/hamsathul/lfm3-omni-lab.git
+cd lfm3-omni-lab
+python3.12 -m venv .venv                      # any arm64 Python 3.10 or newer
+.venv/bin/pip install -r requirements.txt
+brew install ffmpeg agent-browser             # ffmpeg for audio and video, agent-browser for Web
+agent-browser install                         # downloads the Chrome that agent-browser drives
+export LFM3_MODEL="$(.venv/bin/python -m app.pick_model)"   # picks and downloads the checkpoint
+.venv/bin/python -m uvicorn app.server:app --host 127.0.0.1 --port 8765
+```
+
+Then open http://localhost:8765.
 
 ## Using it
 
@@ -129,7 +147,7 @@ The sphere is a light-mode port of [Speaking Orb](https://github.com/aqualang89/
 
 The **Tools** switch under the message box lets the model call these. Each call shows as a card in the reply: open **Details** for the exact arguments and result.
 
-While a tool runs, its card shows a small dotted orb from [Thinking Orbs](https://libraries.dev/orbs) by Jakub Antalik (MIT), one for each kind of work: a turning globe for a web search, a constellation wiring itself for opening or following a page, scrambling bands for the calculator, and orbiting dots for the clock and reminders. Blue means a tool on your Mac, amber the web. A tick or a cross takes its place when the tool finishes. Live mode shows the same orb in the line under your words.
+While a tool runs, its card shows a small dotted orb from [Thinking Orbs](https://libraries.dev/orbs) by Jakub Antalik (MIT), one for each kind of work: a turning globe for a web search, a constellation wiring itself for opening a page or acting on it, scrambling bands for the calculator, and orbiting dots for the clock and reminders. Blue means a tool on your Mac, amber the web. A tick or a cross takes its place when the tool finishes. Live mode shows the same orb in the line under your words.
 
 | Tool | What it does |
 |---|---|
@@ -137,14 +155,78 @@ While a tool runs, its card shows a small dotted orb from [Thinking Orbs](https:
 | Calculator | Exact arithmetic, including percentages |
 | Save a reminder / List reminders | Stores reminders in `data/reminders.json`. They don't notify you. |
 | Web search | Searches DuckDuckGo (Bing if DuckDuckGo returns nothing) and gives the model the top 5 results |
-| Open a page | Opens an address, or a search result by its number, and gives the model the page's text and its first 15 links |
-| Follow a link | Opens one of those links by its number |
+| Open a page | Opens an address, or a search result by its number, and gives the model the page's text and a numbered list of up to 30 things on it it can use: links in the article, buttons, text boxes |
+| Click | Clicks one of those by its number: a link, a button, a checkbox, a cookie banner's Accept |
+| Type | Types into a text box by its number, and presses Enter if the model asks to (a site's own search, a form) |
+| Go back | Returns to the previous page |
 
 The first four run on your Mac and never touch the network. The web tools are offered only when **Web** is on as well (it's off by default). Their cards show a screenshot of what the browser saw; click it for the full size.
 
-The web tools drive a separate headless Chrome with an empty profile, so it's never signed in to anything. It refuses addresses on this Mac and on your local network (`localhost`, `192.168.x.x`, `*.local` and so on), so a web page can't steer the model into reading local services.
+The web tools drive a headless Chrome through [agent-browser](https://github.com/vercel-labs/agent-browser) (`brew install agent-browser` or `npm install -g agent-browser`, then `agent-browser install` once; `start.sh` reminds you). The model can do several steps in one reply: "Open Wikipedia, search it for the Eiffel Tower and tell me how tall it is" opens the page, types into its search box and answers.
+
+It's kept private:
+
+- It has its own agent-browser session and settings file, and a fresh, empty Chrome profile each time it starts, so it's never signed in to anything and never sees your Chrome or your agent-browser setup.
+- Every request it makes goes through a small proxy inside the app (`app/netguard.py`), which looks each address up itself and connects only to the public internet. Addresses on this Mac or your network (`localhost`, `192.168.x.x`, `10.x`, Tailscale's `100.x`, `*.local`) are refused, and so are public names that point at them (`localtest.me`), whether the model opens them, clicks its way there, or a page loads them in the background.
+- What the model types goes to agent-browser as data, never through a shell.
 
 With Web on, the model searches more than it needs to. It often looks up things it already knows, like the capital of France. Changing the tool descriptions and the system prompt didn't fix this, so turn Web on only when you want it. "Look up the latest Python release" on the empty page searches the web for that one message without turning the switch on.
+
+## Native window
+
+`native/` holds the same conversation as a macOS app, so it can live in the Dock instead of a browser tab. It's written in Rust with [Rune](https://github.com/anomalyco/rune) and talks to the lab server the same way the page does, so the server still has to run: start it with `./start.sh`, or with the window's **Start lab server** button.
+
+### Building it
+
+You need:
+
+- macOS 13 or later;
+- the Xcode Command Line Tools, for the linker and `codesign`: `xcode-select --install`;
+- a current stable Rust from [rustup](https://rustup.rs): `curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh`. It's tested with 1.99; if an older one won't build it, run `rustup update`.
+
+Then build and install the app:
+
+```bash
+cd lfm3-omni-lab/native
+./bundle.sh --install
+```
+
+`bundle.sh` makes a release build with `cargo build --release`. The first build downloads Rune from GitHub at a pinned commit and compiles everything, which takes a few minutes; later builds take seconds. It then wraps the program in `native/dist/LFM3-Omni.app` with its icon and the text macOS shows when it asks for the microphone, and signs it ad hoc so macOS remembers that permission. `--install` copies the app to `~/Applications`. Open it from there or from Spotlight, and drag it to the Dock to keep it.
+
+| To | Run, in `native/` |
+|---|---|
+| Build the app without installing it | `./bundle.sh` (the app is `native/dist/LFM3-Omni.app`) |
+| Build just the program | `cargo build --release` (it's `native/target/release/lfm3-omni`) |
+| Run it without making an app | `cargo run --release` |
+| Update it after a `git pull` | `./bundle.sh --install` |
+
+The app remembers the folder it was built from: that's where **Start lab server** runs `start.sh`. If you move the checkout, build it again or set `LFM3_LAB_DIR`. macOS asks for the microphone the first time you record or open live mode, and may ask again after a rebuild, since each build has a new signature.
+
+### What it does
+
+It has:
+
+- typed chat with streamed, formatted replies, the **Tools** and **Web** switches, and **Auto**, **Text** and **Voice** replies;
+- attachments from the + button or dragged onto the window, with picture thumbnails;
+- voice messages from the microphone button, with what it heard shown under the message;
+- spoken replies that start playing while the rest is made, and **Play** under each one;
+- **Stop** or Esc to end a reply, and **Retry** when one fails;
+- live mode (the orb at the end of the message bar, or Cmd+L) with the page's voice detector, **Mute**, **Interrupt** and a **Talk over** switch;
+- the model's status with Start and Stop, and **Start lab server** when the server isn't running. That runs `start.sh` with its output in `data/native-server.log`, and quitting the app stops it again;
+- Cmd+N for a new chat.
+
+The reply mode and the three switches are remembered in `~/Library/Application Support/LFM3-Omni Native/prefs.json`.
+
+It doesn't have the page's Settings (system prompt, temperature, reply length, read-aloud voice), the reminders list, the Log panel or Read aloud for written replies. Use the page for those; both can be open at once.
+
+The window has no echo cancellation, which the page gets from the browser. With **Talk over** on and the replies coming from the Mac's speakers, the model can hear itself and cut itself off, so use headphones for that. With Talk over off (the default) it doesn't listen while it speaks.
+
+| Setting | How |
+|---|---|
+| Another server | `--server http://127.0.0.1:8766`, or `LFM3_SERVER` |
+| Another lab folder (for Start lab server) | `LFM3_LAB_DIR=/path/to/lab` |
+| Open in live mode | `--live` |
+| Print event timings and the audio formats in use | `LFM3_NATIVE_LOG=1` |
 
 ## Limits worth knowing
 
@@ -168,7 +250,8 @@ browser  ──HTTP──>  app/server.py (FastAPI)  ──stdin/stdout JSON lin
                     with ffmpeg, runs the tool loop,                        runs one job at a time,
                     starts/stops the worker                                 streams text and speech
                           │
-                          └── app/browser.py: headless Chrome (Playwright) for the web tools
+                          └── app/browser.py: a private headless Chrome (agent-browser) for the web tools,
+                              every request through app/netguard.py's local-address guard
 ```
 
 The model lives in its own process, so Stop really releases its memory and Restart is a clean reload.
@@ -236,9 +319,20 @@ It drives the same API the page uses, with real media, and ends with the model s
 - a conversation past the 32K context leaving out its earliest turns, and a single message too long for it being refused;
 - the noise guard on a real reply that turned to noise (`tests/fixtures/speech_turns_to_noise.opus`) and on clean speech, and which checkpoint `start.sh` picks for different Macs;
 - transcripts of voice messages, a later turn that relies on one, and a very loud live-mode recording (`tests/fixtures/loud_live_turn.wav`, a real voice kept out of the repository: put any recording of "What time is it in Tokyo?" there that peaks at full scale, or the check is skipped);
-- web search, opening a page, following a link, refusing local addresses, and Web being off unless asked for;
+- web search, opening a page, clicking a link, typing into a site's search box, going back, refusing local addresses, and Web being off unless asked for;
 - read-aloud in English and Arabic;
 - stopping a written or spoken answer, including while a voice message is still being written down, bad input and restarting;
 - stopping the model mid-answer and recovering from a crashed model process.
 
 The web checks need an internet connection.
+
+The native window has its own checks, which need no server:
+
+```bash
+cd native
+cargo test                    # the voice detector, audio, Markdown and API pieces
+cargo test -- --ignored       # plays a second of near-silence on the real speaker
+cargo run -- --snap chat.png --scene chat    # draws one screen; see src/scenes.rs for the rest
+```
+
+With a server running, `LFM3_NATIVE_NET=1 LFM3_NATIVE_REALTIME=1 cargo run -- --script tests/scripts/chat-tools.json --out frames -- --server http://127.0.0.1:8765` drives the window through a real conversation without opening it. The scripts in `native/tests/scripts/` cover tools, a spoken reply, an image, a voice message (add `--hear ../static/samples/speech.wav` at the end) and stopping a reply.

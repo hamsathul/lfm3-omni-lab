@@ -1,0 +1,11 @@
+{"events": [
+  {"t": 1.5, "type": "tap", "key": "reply-Text"},
+  {"t": 2.0, "type": "tap", "key": "draft"},
+  {"t": 2.1, "type": "type", "text": "Write a long story about a dragon."},
+  {"t": 4.5, "type": "key", "name": "Enter"},
+  {"t": 7.0, "type": "tap", "key": "stop"},
+  {"t": 11.0, "type": "tap", "key": "draft"},
+  {"t": 11.1, "type": "type", "text": "In one sentence, what was it about?"},
+  {"t": 14.0, "type": "key", "name": "Enter"},
+  {"t": 24.0, "type": "mark", "name": "end"}
+]}
