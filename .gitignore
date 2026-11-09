@@ -5,3 +5,6 @@ __pycache__/
 .DS_Store
 # a real person's voice, used by one smoke check; not published
 tests/fixtures/loud_live_turn.wav
+# the native window's build output
+native/target/
+native/dist/

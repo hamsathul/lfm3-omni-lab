@@ -1,0 +1,7 @@
+{"events": [
+  {"t": 2.0, "type": "tap", "key": "reply-Voice"},
+  {"t": 2.4, "type": "tap", "key": "draft"},
+  {"t": 2.6, "type": "type", "text": "Say hello in one short sentence."},
+  {"t": 3.5, "type": "key", "name": "Enter"},
+  {"t": 30.0, "type": "mark", "name": "end"}
+]}

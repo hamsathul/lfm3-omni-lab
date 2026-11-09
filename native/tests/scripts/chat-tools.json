@@ -1,0 +1,6 @@
+{"events": [
+  {"t": 2.0, "type": "tap", "key": "draft"},
+  {"t": 2.3, "type": "type", "text": "What is 17.5% of 2,340? Use the calculator."},
+  {"t": 4.0, "type": "key", "name": "Enter"},
+  {"t": 40.0, "type": "mark", "name": "end"}
+]}
